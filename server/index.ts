@@ -4,8 +4,8 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import cors from "cors";
 
-import { ensureDirs } from "./server/config";
-import apiRouter from "./server/routes";
+import { ensureDirs } from "./config";
+import apiRouter from "./routes";
 
 const app = express();
 const PORT = 3000;
