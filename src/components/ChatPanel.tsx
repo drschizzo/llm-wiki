@@ -1,6 +1,8 @@
 import React from 'react';
 import { X, MessageSquare, Sparkles, Plus, Link as LinkIcon, Zap } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { LLMProvider, WikiPage } from '../types';
 
 interface ChatMessage {
@@ -81,8 +83,14 @@ export default function ChatPanel({
               )}
               {chatMessages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-zinc-800 text-zinc-200 rounded-tl-none'}`}>
-                    {msg.content}
+                  <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-zinc-800 text-zinc-200 rounded-tl-none prose prose-invert prose-sm prose-indigo'}`}>
+                    {msg.role === 'user' ? (
+                      msg.content
+                    ) : (
+                      <Markdown remarkPlugins={[remarkGfm]}>
+                        {msg.content}
+                      </Markdown>
+                    )}
                   </div>
                 </div>
               ))}
