@@ -111,8 +111,10 @@ async function callLLM(
     }
 
     const apiUrl = process.env.LMSTUDIO_API_URL || "http://127.0.0.1:1234/v1/chat/completions";
+    const modelName = process.env.LOCAL_MODEL_NAME || "local-model";
+    
     const response = await axios.post(apiUrl, {
-      model: "local-model",
+      model: modelName,
       messages,
       temperature: 0.7
     });
