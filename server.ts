@@ -95,8 +95,12 @@ async function callLLM(
     });
     text = response.text || "";
   } else if (provider === "lmstudio") {
+    let systemContent = systemInstruction;
+    if (jsonMode) {
+      systemContent += "\n\nCRITICAL: You must respond with ONLY strictly valid JSON. Use double quotes for all keys and strings. Do not use trailing commas.";
+    }
     const messages: any[] = [
-      { role: "system", content: systemInstruction }
+      { role: "system", content: systemContent }
     ];
     if (imagePayload) {
       messages.push({
@@ -113,11 +117,16 @@ async function callLLM(
     const apiUrl = process.env.LMSTUDIO_API_URL || "http://127.0.0.1:1234/v1/chat/completions";
     const modelName = process.env.LOCAL_MODEL_NAME || "local-model";
     
-    const response = await axios.post(apiUrl, {
+    const payload: any = {
       model: modelName,
       messages,
       temperature: 0.7
-    });
+    };
+    if (jsonMode) {
+      payload.response_format = { type: "json_object" };
+    }
+    
+    const response = await axios.post(apiUrl, payload);
     text = response.data.choices[0].message.content;
   }
 
