@@ -1,7 +1,7 @@
 import { Router } from "express";
 import fs from "fs/promises";
 import path from "path";
-import { WIKI_DIR } from "../config";
+import { WIKI_DIR, RAW_DIR } from "../config";
 import { callLLM } from "../services/llm.service";
 import { loadGraph, getSubgraphForText } from "../services/graph.service";
 import { applyWikiUpdates, appendToLog } from "../services/wiki.service";
@@ -15,6 +15,7 @@ chatRouter.post("/", async (req, res) => {
   const lastUserMessage = history.length > 0 ? history[history.length - 1].content : "";
   const fullGraph = await loadGraph();
   const localGraphContext = getSubgraphForText(lastUserMessage, fullGraph, 40);
+  const chatId = `chat-${Date.now()}`;
 
   const systemPrompt = `You are a highly autonomous AI Wiki Assistant. You manage the user's personal knowledge base.
 You have access to the Local Graph Neighborhood (nodes relevant to the user's prompt):
@@ -32,6 +33,7 @@ CRITICAL INSTRUCTIONS FOR AUTONOMY & CONNECTIVITY:
 1. NEVER ask for permission to update or create wiki pages. If the conversation contains new, valuable information, concepts, or corrections, you MUST update the wiki IMMEDIATELY by populating the "wikiUpdates" array.
 2. DO NOT say "I will analyze this" or "I'm reading" or "Let me check". Work silently.
 3. ISOLATED PAGES ARE PROHIBITED. If you create a NEW page, you MUST simultaneously update at least one EXISTING page (check the Local Graph Neighborhood) in the "wikiUpdates" array to add a link pointing to your newly created page. Conversely, your new page MUST link to existing pages. Use standard markdown links!
+4. IMPORTANT Source Tracking: For ANY new page you create, you MUST append \`\n\n---\n**Source:** [Conversation Transcript](/raw/${chatId}.md)\` to the bottom of the page content.
 
 Format your response as a JSON object exactly like this:
 {
@@ -47,6 +49,15 @@ Format your response as a JSON object exactly like this:
 If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "logEntry".`;
 
   let currentPrompt = history.map((msg: any) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n') + '\n\nAssistant:';
+
+  // Save the conversation to RAW_DIR as a transcript source
+  try {
+    const transcriptContent = history.map((msg: any) => `**${msg.role === 'user' ? 'User' : 'Assistant'}:**\n${msg.content}`).join('\n\n');
+    const transcriptPath = path.join(RAW_DIR, `${chatId}.md`);
+    await fs.writeFile(transcriptPath, transcriptContent, "utf-8");
+  } catch (err) {
+    console.error("Failed to save conversation transcript source:", err);
+  }
 
   try {
     let loopCount = 0;

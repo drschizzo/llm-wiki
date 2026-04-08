@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import cors from "cors";
 
-import { ensureDirs } from "./config";
+import { ensureDirs, RAW_DIR } from "./config";
 import apiRouter from "./routes";
 
 const app = express();
@@ -15,6 +15,9 @@ app.use(express.json({ limit: '50mb' }));
 
 // Mount all API routes
 app.use("/api", apiRouter);
+
+// Statically serve raw uploaded files and chat transcripts
+app.use("/raw", express.static(RAW_DIR));
 
 // --- VITE MIDDLEWARE ---
 async function startServer() {

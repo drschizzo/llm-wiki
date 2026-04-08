@@ -44,7 +44,8 @@ ingestRouter.post("/url", async (req, res) => {
       "logEntry": "string (a 1-line description of what was ingested)"
     }
     
-    Ensure that one of the items in "updates" has the id "index" containing the full updated content of index.md.`;
+    Ensure that one of the items in "updates" has the id "index" containing the full updated content of index.md.
+    5. Append \`\n\n---\n**Source:** [${url}](${url})\` to the bottom of the content of the summaryPage you create.`;
 
     const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true);
     await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
@@ -81,7 +82,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
 
   try {
     const updatedPages: string[] = [];
-    let filesToProcess: { path: string, originalname: string, mtimeMs: number }[] = [];
+    let filesToProcess: { path: string, originalname: string, safeName: string, mtimeMs: number }[] = [];
 
     for (const file of uploadedFiles) {
       if (file.originalname.toLowerCase().endsWith('.zip')) {
@@ -94,12 +95,22 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
 
         const unzippedFiles = await processFilesRecursive(extractPath);
         for (const uf of unzippedFiles) {
-          const stat = await fs.stat(uf);
-          filesToProcess.push({ path: uf, originalname: path.basename(uf), mtimeMs: stat.mtimeMs });
+          const ext = path.extname(uf);
+          const baseName = path.basename(uf, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const safeName = `${Date.now()}-${baseName}${ext}`;
+          const targetPath = path.join(RAW_DIR, safeName);
+          await fs.copyFile(uf, targetPath);
+          const stat = await fs.stat(targetPath);
+          filesToProcess.push({ path: targetPath, originalname: path.basename(uf), safeName: safeName, mtimeMs: stat.mtimeMs });
         }
       } else {
-        const stat = await fs.stat(file.path);
-        filesToProcess.push({ path: file.path, originalname: file.originalname, mtimeMs: stat.mtimeMs });
+        const ext = path.extname(file.originalname);
+        const baseName = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const safeName = `${Date.now()}-${baseName}${ext}`;
+        const targetPath = path.join(RAW_DIR, safeName);
+        await fs.rename(file.path, targetPath);
+        const stat = await fs.stat(targetPath);
+        filesToProcess.push({ path: targetPath, originalname: file.originalname, safeName: safeName, mtimeMs: stat.mtimeMs });
       }
     }
 
@@ -144,6 +155,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
       1. Create a summary page explaining this image.
       2. Identify key entities and concepts.
       3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.
+      4. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\` to the bottom of the content of the summaryPage you create.
       CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
         {
           "summaryPage": { "id": "string", "content": "markdown" },
@@ -197,7 +209,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
               chunkPrompt += `Content:\n${chunkText}\n\n${localGraphContext}\n\nPlease:\n`;
 
               if (part === 0) {
-                chunkPrompt += `1. Create a summary page for this source.\n`;
+                chunkPrompt += `1. Create a summary page for this source. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\` to the bottom of its content.\n`;
               } else {
                 chunkPrompt += `1. For the "summaryPage" property, DO NOT output a brand new page. Output ONLY the NEW information from this part, which the system will automatically append to the master summary page "${masterSummaryId}". Use the id "${masterSummaryId}".\n`;
               }
