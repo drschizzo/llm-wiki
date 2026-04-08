@@ -1,0 +1,5 @@
+{
+  "name": "LLM Wiki",
+  "description": "A personal knowledge base that grows and maintains itself using LLMs.",
+  "requestFramePermissions": []
+}
