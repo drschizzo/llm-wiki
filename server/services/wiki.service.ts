@@ -34,8 +34,19 @@ export async function applyWikiUpdates(updates: any[]) {
   if (!updates || !Array.isArray(updates)) return;
   for (const update of updates) {
     if (!update.id || !update.content) continue;
+    if (update.id === 'index' || update.id === 'log') continue; // Auto-generated/system pages
     const filePath = path.join(WIKI_DIR, `${update.id}.md`);
-    await fs.writeFile(filePath, update.content, "utf-8");
+    try {
+      const existing = await fs.readFile(filePath, "utf-8");
+      
+      // Smart formatting: if appending a list item, use single new line to keep lists compact
+      const isListItem = /^\s*[-*]\s+/.test(update.content);
+      const appendStr = isListItem ? `\n${update.content}` : `\n\n${update.content}`;
+      
+      await fs.writeFile(filePath, existing + appendStr, "utf-8");
+    } catch {
+      await fs.writeFile(filePath, update.content, "utf-8");
+    }
   }
   await buildGraphFull();
 }

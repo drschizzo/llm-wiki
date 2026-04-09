@@ -69,12 +69,32 @@ export async function callLLM(
   }
 
   if (jsonMode) {
-    const jsonStr = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1] || text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1) || text;
+    let jsonStr = text.trim();
+    // If wrapped in ```json or ```, remove those markers.
+    if (jsonStr.startsWith("```json")) {
+      jsonStr = jsonStr.substring(7);
+      if (jsonStr.endsWith("```")) {
+        jsonStr = jsonStr.substring(0, jsonStr.length - 3);
+      }
+    } else if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.substring(3);
+      if (jsonStr.endsWith("```")) {
+        jsonStr = jsonStr.substring(0, jsonStr.length - 3);
+      }
+    }
+    
+    // Extract everything between the first { and the last }
+    const firstBrace = jsonStr.indexOf('{');
+    const lastBrace = jsonStr.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace >= firstBrace) {
+      jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+    }
+
     try {
       return JSON.parse(jsonStr);
     } catch (e) {
       const debugFile = path.join(DATA_DIR, `failed_json_${Date.now()}.txt`);
-      try { await fs.writeFile(debugFile, jsonStr, "utf-8"); } catch (err) { }
+      try { await fs.writeFile(debugFile, text, "utf-8"); } catch (err) { }
       console.error(`Failed to parse JSON. Raw output saved to ${debugFile}`);
       throw new Error(`Invalid JSON response from LLM. Raw text saved to ${debugFile}`);
     }

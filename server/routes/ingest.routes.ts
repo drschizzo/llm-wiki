@@ -75,6 +75,138 @@ async function processFilesRecursive(dir: string): Promise<string[]> {
   return files;
 }
 
+/**
+ * Adaptive content splitting: tries semantic section detection first,
+ * falls back to size-based chunking.
+ *
+ * Level 1: H2 markdown headers (## ) — needs at least 3 occurrences
+ * Level 2: Separators (--- or ===) — needs at least 2 occurrences
+ * Fallback: raw size-based chunking (existing behavior)
+ *
+ * Post-processing:
+ * - Sections < 200 chars are merged with the next section
+ * - Sections > maxChunkLength are re-split by size
+ */
+function splitIntoSections(content: string, maxChunkLength: number): { chunks: string[], isStructural: boolean } {
+  let sections: string[] = [];
+  let isStructural = false;
+
+  // Level 1: H2 markdown headers (## )
+  const h2Regex = /^## /gm;
+  const h2Positions: number[] = [];
+  let match;
+  while ((match = h2Regex.exec(content)) !== null) {
+    h2Positions.push(match.index);
+  }
+
+  if (h2Positions.length >= 3) {
+    isStructural = true;
+    // Text before the first H2 is the introduction
+    const intro = content.substring(0, h2Positions[0]).trim();
+    if (intro.length > 0) sections.push(intro);
+    // Each H2 section runs until the next H2 or end of file
+    for (let i = 0; i < h2Positions.length; i++) {
+      const start = h2Positions[i];
+      const end = i + 1 < h2Positions.length ? h2Positions[i + 1] : content.length;
+      sections.push(content.substring(start, end).trim());
+    }
+  } else {
+    // Level 2: Separators (--- or ===, at least 3 chars on their own line)
+    const sepRegex = /^-{3,}$|^={3,}$/gm;
+    const sepPositions: { start: number; end: number }[] = [];
+    while ((match = sepRegex.exec(content)) !== null) {
+      sepPositions.push({ start: match.index, end: match.index + match[0].length });
+    }
+
+    if (sepPositions.length >= 2) {
+      isStructural = true;
+      let lastEnd = 0;
+      for (const sep of sepPositions) {
+        const section = content.substring(lastEnd, sep.start).trim();
+        if (section.length > 0) sections.push(section);
+        lastEnd = sep.end;
+      }
+      const remaining = content.substring(sepPositions[sepPositions.length - 1].end).trim();
+      if (remaining.length > 0) sections.push(remaining);
+    }
+  }
+
+  // No structure detected — fall back to size-based chunking
+  if (!isStructural) {
+    const chunks: string[] = [];
+    let r = 0;
+    while (r < content.length) {
+      let end = Math.min(r + maxChunkLength, content.length);
+      if (end < content.length) {
+        const lastNewline = content.lastIndexOf('\n', end);
+        if (lastNewline > r + maxChunkLength * 0.8) {
+          end = lastNewline + 1;
+        }
+      }
+      chunks.push(content.substring(r, end));
+      r = end;
+    }
+    return { chunks, isStructural: false };
+  }
+
+  // Post-processing: merge small sections (<200 chars) with the next one
+  const MIN_SECTION_LENGTH = 200;
+  const merged: string[] = [];
+  let buffer = "";
+  for (const section of sections) {
+    if (buffer.length > 0) {
+      buffer += "\n\n" + section;
+    } else {
+      buffer = section;
+    }
+    if (buffer.length >= MIN_SECTION_LENGTH) {
+      merged.push(buffer);
+      buffer = "";
+    }
+  }
+  if (buffer.length > 0) {
+    if (merged.length > 0) {
+      merged[merged.length - 1] += "\n\n" + buffer;
+    } else {
+      merged.push(buffer);
+    }
+  }
+
+  // Re-split any sections that still exceed maxChunkLength
+  const result: string[] = [];
+  for (const section of merged) {
+    if (section.length > maxChunkLength) {
+      let r = 0;
+      while (r < section.length) {
+        let end = Math.min(r + maxChunkLength, section.length);
+        if (end < section.length) {
+          const lastNewline = section.lastIndexOf('\n', end);
+          if (lastNewline > r + maxChunkLength * 0.8) {
+            end = lastNewline + 1;
+          }
+        }
+        result.push(section.substring(r, end));
+        r = end;
+      }
+    } else {
+      result.push(section);
+    }
+  }
+
+  return { chunks: result, isStructural: true };
+}
+
+const FIDELITY_INSTRUCTIONS = `
+CONTENT FIDELITY INSTRUCTIONS (CRITICAL):
+- You MUST preserve ALL code blocks, commands, SQL queries, and configuration snippets EXACTLY as they appear in the source. Include them in fenced code blocks with the appropriate language tag.
+- You MUST preserve step-by-step procedures with ALL their numbered steps. Do NOT summarize "steps 1-5" into one sentence.
+- You MUST preserve author attributions (e.g. "Auteur : X") when present.
+- You MUST preserve ALL concrete examples, class names, method names, file paths, URLs, and configuration values.
+- Do NOT summarize or paraphrase technical content. The wiki page must contain the SAME level of detail as the original source.
+- Each wiki page should be COMPLETE and STANDALONE — a reader should NOT need to consult the original source file.
+- IMPORTANT: When updating an EXISTING page (either via summaryPage or updates), provide ONLY the NEW content to be added. The system will automatically APPEND your output to the bottom of the existing page. Never try to rewrite the full existing content.
+`;
+
 // Ingest Files
 ingestRouter.post("/files", upload.array("files"), async (req, res) => {
   const uploadedFiles = (req as any).files as any[];
@@ -174,48 +306,55 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
             const content = await fs.readFile(file.path, "utf-8");
             const MAX_CHUNK_LENGTH = process.env.MAX_CHUNK_LENGTH ? parseInt(process.env.MAX_CHUNK_LENGTH) : 30000;
 
-            let chunks: string[] = [];
-            let r = 0;
-            while (r < content.length) {
-              let end = Math.min(r + MAX_CHUNK_LENGTH, content.length);
-              if (end < content.length) {
-                const lastNewline = content.lastIndexOf('\n', end);
-                if (lastNewline > r + MAX_CHUNK_LENGTH * 0.8) {
-                  end = lastNewline + 1;
-                }
-              }
-              chunks.push(content.substring(r, end));
-              r = end;
-            }
+            const { chunks, isStructural } = splitIntoSections(content, MAX_CHUNK_LENGTH);
+
+            console.log(`${logPrefix} - Split into ${chunks.length} ${isStructural ? 'sections' : 'chunks'}.`);
 
             let masterSummaryId = "";
 
             for (let part = 0; part < chunks.length; part++) {
               const chunkText = chunks[part];
-              const chunkLogPrefix = chunks.length > 1 ? `${logPrefix} (Part ${part + 1}/${chunks.length})` : logPrefix;
+              const label = isStructural ? "Section" : "Part";
+              const chunkLogPrefix = chunks.length > 1 ? `${logPrefix} (${label} ${part + 1}/${chunks.length})` : logPrefix;
 
-              console.log(`${chunkLogPrefix} - Processing chunk...`);
+              console.log(`${chunkLogPrefix} - Processing...`);
 
               // Load graph freshly per-chunk so inter-chunk links exist!
               const currentGraph = await loadGraph();
               const localGraphContext = getSubgraphForText(chunkText.substring(0, 5000), currentGraph, 30);
 
               let chunkPrompt = `I have a source file named "${file.originalname}".\n`;
+
               if (chunks.length > 1) {
-                chunkPrompt += `This is PART ${part + 1} of ${chunks.length}.\n`;
-                if (part > 0) chunkPrompt += `\nCRITICAL CONTEXT: In previous parts, you established the main summary page under the ID "${masterSummaryId}". You must continue to link to the concepts you already created.\n`;
+                if (isStructural) {
+                  chunkPrompt += `This file contains ${chunks.length} distinct sections. You are processing SECTION ${part + 1} of ${chunks.length}.\n`;
+                } else {
+                  chunkPrompt += `This is PART ${part + 1} of ${chunks.length}.\n`;
+                }
+                if (part > 0) {
+                  chunkPrompt += `\nCONTEXT: The main hub/summary page was created with ID "${masterSummaryId}". You must link to it and to concepts already created in previous sections.\n`;
+                }
               }
 
               chunkPrompt += `Content:\n${chunkText}\n\n${localGraphContext}\n\nPlease:\n`;
 
               if (part === 0) {
-                chunkPrompt += `1. Create a summary page for this source. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\` to the bottom of its content.\n`;
+                // First chunk/section always creates the hub page
+                chunkPrompt += `1. Create a summary/hub page for this source. This hub page MUST end with a "## Sections" header to prepare for child TOC entries.\n`;
+              } else if (isStructural) {
+                // Structural mode: organize by topic
+                chunkPrompt += `1. For the "summaryPage", identify the primary topic of this section. Check the LOCAL GRAPH NEIGHBORHOOD to see if a page for this topic already exists.\n   - If a relevant page exists, reuse its ID. Your new detailed content will be automatically appended to it.\n   - If no relevant page exists, invent a new descriptive standalone ID.\n`;
               } else {
-                chunkPrompt += `1. For the "summaryPage" property, DO NOT output a brand new page. Output ONLY the NEW information from this part, which the system will automatically append to the master summary page "${masterSummaryId}". Use the id "${masterSummaryId}".\n`;
+                // Size-based mode: append to the master page
+                chunkPrompt += `1. For the "summaryPage", use the exact id "${masterSummaryId}". Output ONLY the NEW information from this part, which the system will automatically append to the master summary page.\n`;
               }
 
-              chunkPrompt += `2. Identify key entities and concepts.\n3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.
-      CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
+              chunkPrompt += `2. Identify key entities and concepts.\n3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.\n`;
+              if (part > 0 && masterSummaryId) {
+                chunkPrompt += `4. IMPORTANT: You MUST include an update for the hub page ("${masterSummaryId}") containing EXACTLY ONE list item (e.g. "- [Your Topic](your_id): description") to append to its Table of Contents. Do NOT include any headers in this update.\n`;
+              }
+              chunkPrompt += FIDELITY_INSTRUCTIONS;
+              chunkPrompt += `CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
         {
           "summaryPage": { "id": "string", "content": "markdown" },
           "updates": [ { "id": "string", "content": "markdown" } ],
@@ -226,21 +365,11 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
 
               if (part === 0 && parsed.summaryPage?.id) {
                 masterSummaryId = parsed.summaryPage.id;
-                await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
-                updatedPages.push(masterSummaryId);
-              } else if (part > 0 && masterSummaryId) {
-                if (parsed.summaryPage?.content) {
-                  const masterPath = path.join(WIKI_DIR, `${masterSummaryId}.md`);
-                  try {
-                    let existing = await fs.readFile(masterPath, "utf-8");
-                    existing += `\n\n${parsed.summaryPage.content}`;
-                    await fs.writeFile(masterPath, existing, "utf-8");
-                  } catch (e) { }
-                }
-                await applyWikiUpdates(parsed.updates || []);
-              } else {
-                await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
               }
+
+              await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
+              if (parsed.summaryPage?.id) updatedPages.push(parsed.summaryPage.id);
+              updatedPages.push(...(parsed.updates || []).map((u: any) => u.id));
 
               if (parsed.logEntry) await appendToLog(parsed.logEntry);
               updatedPages.push(...(parsed.updates || []).map((u: any) => u.id));
@@ -252,6 +381,22 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
             continue;
           }
         }
+        
+        // Programmatic Provenance: Append source to all pages touched by this file
+        try {
+          const uniquePagesForFile = [...new Set(updatedPages)]; // Simplification: updatedPages includes all
+          const sourceBlock = `\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})`;
+          for (const pageId of uniquePagesForFile) {
+            if (pageId === "index" || pageId === "log") continue;
+            const pagePath = path.join(WIKI_DIR, `${pageId}.md`);
+            try {
+              const content = await fs.readFile(pagePath, "utf-8");
+              if (!content.includes(`**Source:** [${file.originalname}]`)) {
+                await fs.writeFile(pagePath, content + sourceBlock, "utf-8");
+              }
+            } catch (e) {}
+          }
+        } catch (e) {}
 
         await saveProcessedHash(fileHash);
         processedHashes.push(fileHash);
