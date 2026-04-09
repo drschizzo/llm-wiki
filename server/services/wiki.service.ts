@@ -335,6 +335,90 @@ export async function splitPage(pageId: string, sections: SplitSection[]): Promi
   return { success: true, createdPages };
 }
 
+// --- Link Management ---
+
+/**
+ * Adds a markdown link to targetId at the end of the source page.
+ * Rebuilds the graph after modification.
+ */
+export async function addLinkToPage(sourceId: string, targetId: string): Promise<{ success: boolean }> {
+  const sourcePath = path.join(WIKI_DIR, `${sourceId}.md`);
+  const targetPath = path.join(WIKI_DIR, `${targetId}.md`);
+
+  // Both pages must exist
+  try {
+    await fs.access(sourcePath);
+    await fs.access(targetPath);
+  } catch {
+    return { success: false };
+  }
+
+  // Get target title for the link text
+  const targetContent = await fs.readFile(targetPath, "utf-8");
+  const titleMatch = targetContent.match(/^#\s+(.+)$/m);
+  const targetTitle = titleMatch ? titleMatch[1].trim() : targetId;
+
+  // Check if link already exists
+  const sourceContent = await fs.readFile(sourcePath, "utf-8");
+  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let match;
+  while ((match = linkRegex.exec(sourceContent)) !== null) {
+    let existingTarget = match[2].trim();
+    if (existingTarget.endsWith('.md')) existingTarget = existingTarget.slice(0, -3);
+    if (existingTarget === targetId) {
+      // Link already exists
+      return { success: true };
+    }
+  }
+
+  // Append the link
+  const updatedContent = sourceContent.trimEnd() + `\n\n→ Voir aussi : [${targetTitle}](${targetId})\n`;
+  await fs.writeFile(sourcePath, updatedContent, "utf-8");
+  console.log(`[Wiki] Added link from "${sourceId}" to "${targetId}"`);
+
+  await buildGraphFull();
+  return { success: true };
+}
+
+/**
+ * Removes all markdown links pointing to targetId from the source page.
+ * The link text is preserved, only the link formatting is stripped.
+ * Rebuilds the graph after modification.
+ */
+export async function removeLinkFromPage(sourceId: string, targetId: string): Promise<{ success: boolean; removed: number }> {
+  const sourcePath = path.join(WIKI_DIR, `${sourceId}.md`);
+
+  try {
+    await fs.access(sourcePath);
+  } catch {
+    return { success: false, removed: 0 };
+  }
+
+  const content = await fs.readFile(sourcePath, "utf-8");
+  const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let removed = 0;
+
+  const newContent = content.replace(linkRegex, (match, label, target) => {
+    let cleanTarget = target.trim();
+    if (cleanTarget.endsWith('.md')) cleanTarget = cleanTarget.slice(0, -3);
+    if (cleanTarget.startsWith('http') || cleanTarget.startsWith('#') || cleanTarget.startsWith('/')) return match;
+
+    if (cleanTarget === targetId) {
+      removed++;
+      return label; // Strip link formatting, keep text
+    }
+    return match;
+  });
+
+  if (removed > 0) {
+    await fs.writeFile(sourcePath, newContent, "utf-8");
+    console.log(`[Wiki] Removed ${removed} link(s) from "${sourceId}" to "${targetId}"`);
+    await buildGraphFull();
+  }
+
+  return { success: true, removed };
+}
+
 // --- Log ---
 
 export async function appendToLog(logEntry: string) {

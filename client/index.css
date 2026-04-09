@@ -23,3 +23,364 @@
   .markdown-body th { @apply bg-zinc-900 border border-zinc-800 p-2 text-left font-bold; }
   .markdown-body td { @apply border border-zinc-800 p-2; }
 }
+
+/* === Graph Toolbar === */
+.graph-toolbar {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(24, 24, 27, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.graph-toolbar button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #a1a1aa;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.graph-toolbar button:hover {
+  color: #e4e4e7;
+  background: rgba(63, 63, 70, 0.4);
+}
+
+.graph-toolbar button.active {
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+/* === Graph Context Menu === */
+.graph-context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 200px;
+  padding: 6px;
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: contextMenuIn 0.15s ease-out;
+}
+
+@keyframes contextMenuIn {
+  from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.graph-context-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #d4d4d8;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.graph-context-menu button:hover {
+  color: #fff;
+  background: rgba(63, 63, 70, 0.5);
+}
+
+.graph-context-menu button.danger:hover {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.graph-context-menu .separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: rgba(63, 63, 70, 0.5);
+}
+
+/* === Cluster Legend === */
+.cluster-legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 20;
+  max-width: 260px;
+  padding: 10px 12px;
+  background: rgba(24, 24, 27, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.cluster-legend-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #71717a;
+  margin-bottom: 8px;
+}
+
+.cluster-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  position: relative;
+}
+
+.cluster-legend-item:hover {
+  background: rgba(63, 63, 70, 0.4);
+}
+
+.cluster-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cluster-legend-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #d4d4d8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.cluster-legend-count {
+  font-size: 11px;
+  color: #71717a;
+  flex-shrink: 0;
+}
+
+/* === Cluster Create / Edit Panel === */
+.cluster-panel {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  z-index: 30;
+  width: 300px;
+  padding: 16px;
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: contextMenuIn 0.2s ease-out;
+}
+
+.cluster-panel-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e4e4e7;
+  margin-bottom: 14px;
+}
+
+.cluster-panel input[type="text"] {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #e4e4e7;
+  background: rgba(39, 39, 42, 0.8);
+  border: 1px solid rgba(63, 63, 70, 0.5);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.cluster-panel input[type="text"]:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.cluster-panel-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.cluster-panel-color {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: all 0.15s ease;
+}
+
+.cluster-panel-color:hover {
+  transform: scale(1.15);
+}
+
+.cluster-panel-color.selected {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.15);
+}
+
+.cluster-panel-hint {
+  font-size: 12px;
+  color: #71717a;
+  margin: 8px 0 12px;
+}
+
+.cluster-panel-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.cluster-panel-actions button {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: none;
+}
+
+.cluster-panel-actions .btn-cancel {
+  color: #a1a1aa;
+  background: transparent;
+}
+
+.cluster-panel-actions .btn-cancel:hover {
+  color: #e4e4e7;
+}
+
+.cluster-panel-actions .btn-save {
+  color: #fff;
+  background: #6366f1;
+}
+
+.cluster-panel-actions .btn-save:hover {
+  background: #818cf8;
+}
+
+.cluster-panel-actions .btn-save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cluster-panel-actions .btn-delete {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  margin-right: auto;
+}
+
+.cluster-panel-actions .btn-delete:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+
+/* === Cluster Badges (on pages) === */
+.cluster-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cluster-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 7px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 999px;
+  transition: opacity 0.2s;
+}
+
+.cluster-badge:hover {
+  opacity: 0.8;
+}
+
+.cluster-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* === Graph link mode indicator === */
+.graph-link-indicator {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #a5b4fc;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 12px;
+  backdrop-filter: blur(12px);
+  animation: contextMenuIn 0.2s ease-out;
+}
+
+/* === Graph unlink mode indicator === */
+.graph-unlink-indicator {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 12px;
+  backdrop-filter: blur(12px);
+  animation: contextMenuIn 0.2s ease-out;
+}
+
+/* === Graph selection mode indicator === */
+.graph-select-indicator {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 12px;
+  backdrop-filter: blur(12px);
+  animation: contextMenuIn 0.2s ease-out;
+}

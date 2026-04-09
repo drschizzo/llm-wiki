@@ -83,6 +83,25 @@ export default function PageViewer({
           </div>
         </div>
 
+        {/* Cluster badges */}
+        {currentPage.clusters && currentPage.clusters.length > 0 && (
+          <div className="cluster-badges">
+            {currentPage.clusters.map(cl => (
+              <span
+                key={cl.id}
+                className="cluster-badge"
+                style={{
+                  background: `${cl.color}18`,
+                  color: cl.color,
+                  border: `1px solid ${cl.color}30`,
+                }}
+              >
+                <span className="cluster-badge-dot" style={{ background: cl.color }} />
+                {cl.label}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="prose prose-invert prose-indigo max-w-none">
           {isEditing ? (
             <div data-color-mode="dark" className="w-full">

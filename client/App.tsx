@@ -287,6 +287,7 @@ export default function App() {
               currentPageId={currentPage?.id}
               loadPage={loadPage}
               setViewMode={setViewMode}
+              onGraphChanged={loadGraphData}
             />
           ) : (
             <PageViewer 

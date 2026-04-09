@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { WIKI_DIR } from "../config";
 import { buildGraphFull } from "../services/graph.service";
+import { getClustersForPage } from "../services/cluster.service";
 
 export const wikiRouter = Router();
 
@@ -17,12 +18,13 @@ wikiRouter.get("/", async (req, res) => {
   }
 });
 
-// Get a wiki page
+// Get a wiki page (enriched with clusters)
 wikiRouter.get("/:id", async (req, res) => {
   try {
     const filePath = path.join(WIKI_DIR, `${req.params.id}.md`);
     const content = await fs.readFile(filePath, "utf-8");
-    res.json({ id: req.params.id, content });
+    const clusters = await getClustersForPage(req.params.id);
+    res.json({ id: req.params.id, content, clusters });
   } catch (err) {
     res.status(404).json({ error: "Page not found" });
   }
