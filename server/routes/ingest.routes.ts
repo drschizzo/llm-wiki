@@ -265,6 +265,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
 
         console.log(`${logPrefix} - Processing "${file.originalname}"...`);
 
+        const fileUpdatedPages: string[] = [];
         const fullGraph = await loadGraph();
         let documentContext = "";
 
@@ -298,7 +299,9 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
           const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true, imagePayload);
           await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
           if (parsed.logEntry) await appendToLog(parsed.logEntry);
-          updatedPages.push(parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id));
+          const newPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
+          updatedPages.push(...newPageIds);
+          fileUpdatedPages.push(...newPageIds);
           console.log(`${logPrefix} - Success. Generated summary: ${parsed.summaryPage?.id}`);
 
         } else {
@@ -368,11 +371,11 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
               }
 
               await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
-              if (parsed.summaryPage?.id) updatedPages.push(parsed.summaryPage.id);
-              updatedPages.push(...(parsed.updates || []).map((u: any) => u.id));
+              const chunkPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
+              updatedPages.push(...chunkPageIds);
+              fileUpdatedPages.push(...chunkPageIds);
 
               if (parsed.logEntry) await appendToLog(parsed.logEntry);
-              updatedPages.push(...(parsed.updates || []).map((u: any) => u.id));
 
               console.log(`${chunkLogPrefix} - Success.`);
             }
@@ -384,7 +387,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
         
         // Programmatic Provenance: Append source to all pages touched by this file
         try {
-          const uniquePagesForFile = [...new Set(updatedPages)]; // Simplification: updatedPages includes all
+          const uniquePagesForFile = [...new Set(fileUpdatedPages)];
           const sourceBlock = `\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})`;
           for (const pageId of uniquePagesForFile) {
             if (pageId === "index" || pageId === "log") continue;
