@@ -155,7 +155,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
       1. Create a summary page explaining this image.
       2. Identify key entities and concepts.
       3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.
-      4. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\` to the bottom of the content of the summaryPage you create.
+      4. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\n\n![${file.originalname}](/raw/${file.safeName})\` to the bottom of the content of the summaryPage you create.
       CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
         {
           "summaryPage": { "id": "string", "content": "markdown" },
