@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { WIKI_DIR } from "../config";
 import { buildGraphFull } from "../services/graph.service";
+import { mergePages, splitPage, SplitSection } from "../services/wiki.service";
 
 export const adminRouter = Router();
 
@@ -53,5 +54,50 @@ adminRouter.post("/clean-links", async (req, res) => {
     res.json({ success: true, modifiedFiles: totalModifiedFiles, removedLinks: totalRemovedLinks });
   } catch (err: any) {
     res.status(500).json({ error: "Failed to clean links", details: err.message });
+  }
+});
+
+// Merge two pages: source is merged INTO target, source is deleted
+adminRouter.post("/merge", async (req, res) => {
+  const { targetId, sourceId } = req.body;
+
+  if (!targetId || !sourceId) {
+    return res.status(400).json({ error: "Both targetId and sourceId are required" });
+  }
+
+  try {
+    const result = await mergePages(targetId, sourceId);
+    if (!result.success) {
+      return res.status(404).json({ error: "One or both pages not found, or invalid IDs" });
+    }
+    res.json({ success: true, rewrittenLinks: result.rewrittenLinks });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to merge pages", details: err.message });
+  }
+});
+
+// Split a page into multiple sub-pages
+adminRouter.post("/split", async (req, res) => {
+  const { pageId, sections } = req.body as { pageId: string; sections: SplitSection[] };
+
+  if (!pageId || !sections || !Array.isArray(sections) || sections.length < 2) {
+    return res.status(400).json({ error: "pageId and at least 2 sections are required" });
+  }
+
+  // Validate sections
+  for (const section of sections) {
+    if (!section.id || !section.title || !section.content) {
+      return res.status(400).json({ error: "Each section must have id, title, and content" });
+    }
+  }
+
+  try {
+    const result = await splitPage(pageId, sections);
+    if (!result.success) {
+      return res.status(404).json({ error: "Page not found or invalid ID" });
+    }
+    res.json({ success: true, createdPages: result.createdPages });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to split page", details: err.message });
   }
 });

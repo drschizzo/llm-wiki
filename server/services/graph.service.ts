@@ -9,6 +9,25 @@ export function tokenize(text: string): string[] {
   return text.toLowerCase().replace(/[^a-z0-9àâäéèêëïîôöùûüÿç]/g, ' ').split(/\s+/).filter(w => w.length > 2);
 }
 
+/**
+ * Returns a short snippet of a wiki page's content (strips the title header).
+ * Used to give the LLM preview context for better page matching.
+ */
+export async function getPageSnippet(pageId: string, maxLength: number = 200): Promise<string> {
+  try {
+    const content = await fs.readFile(path.join(WIKI_DIR, `${pageId}.md`), "utf-8");
+    // Strip the first H1 line, source blocks, and collapse whitespace
+    const stripped = content
+      .replace(/^#\s+.+$/m, '')        // Remove H1 title
+      .replace(/---\n\*\*Source:\*\*.+/gs, '')  // Remove source blocks
+      .replace(/\s+/g, ' ')
+      .trim();
+    return stripped.substring(0, maxLength);
+  } catch {
+    return "";
+  }
+}
+
 export async function buildGraphFull(): Promise<WikiGraph> {
   const files = await fs.readdir(WIKI_DIR).catch(() => []);
   const graph: WikiGraph = { nodes: {}, edges: {} };
@@ -71,7 +90,7 @@ export async function loadGraph(): Promise<WikiGraph> {
   }
 }
 
-export function getSubgraphForText(text: string, graph: WikiGraph, maxNodes: number = 30): string {
+export async function getSubgraphForText(text: string, graph: WikiGraph, maxNodes: number = 30): Promise<string> {
   const textTokens = new Set(tokenize(text));
 
   const scores = Object.values(graph.nodes).map(node => {
@@ -102,6 +121,7 @@ export function getSubgraphForText(text: string, graph: WikiGraph, maxNodes: num
     }
   }
 
+  // Build output with content previews for better semantic matching
   let output = "=== LOCAL GRAPH NEIGHBORHOOD ===\n";
   let added = 0;
   for (const id of expandedSet) {
@@ -109,7 +129,9 @@ export function getSubgraphForText(text: string, graph: WikiGraph, maxNodes: num
     const node = graph.nodes[id];
     if (!node) continue;
     const outs = graph.edges[id] || [];
-    output += `ID: ${id} | Title: "${node.title}" | Links_to: [${outs.join(', ')}]\n`;
+    const snippet = await getPageSnippet(id, 200);
+    const previewStr = snippet ? ` | Preview: "${snippet}"` : '';
+    output += `ID: ${id} | Title: "${node.title}"${previewStr} | Links_to: [${outs.join(', ')}]\n`;
     added++;
   }
 

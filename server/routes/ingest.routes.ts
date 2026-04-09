@@ -8,7 +8,7 @@ import AdmZip from "adm-zip";
 import { DATA_DIR, RAW_DIR, WIKI_DIR, WIKI_SYSTEM_PROMPT } from "../config";
 import { callLLM } from "../services/llm.service";
 import { loadGraph, getSubgraphForText } from "../services/graph.service";
-import { applyWikiUpdates, appendToLog, getFileHash, loadProcessedHashes, saveProcessedHash } from "../services/wiki.service";
+import { applyWikiUpdates, appendToLog, getFileHash, loadProcessedHashes, saveProcessedHash, deletePage, mergePages, splitPage } from "../services/wiki.service";
 
 export const ingestRouter = Router();
 const upload = multer({ dest: RAW_DIR });
@@ -26,29 +26,39 @@ ingestRouter.post("/url", async (req, res) => {
     const indexContent = await fs.readFile(path.join(WIKI_DIR, "index.md"), "utf-8").catch(() => "# Wiki Index");
 
     const prompt = `I have a new source titled "${title}". 
-    Content: ${text.substring(0, 5000)}
-    
-    CURRENT WIKI INDEX (index.md):
-    ${indexContent}
-    
-    Please:
-    1. Create a summary page for this source.
-    2. Identify key entities and concepts.
-    3. Update the existing index.md to include the new summary page and any new concepts, categorized appropriately.
-    4. Suggest updates for other existing wiki pages or new pages to create.
-    
-    Format your response as a JSON object exactly like this:
-    {
-      "summaryPage": { "id": "string", "content": "markdown" },
-      "updates": [ { "id": "string", "content": "markdown" } ],
-      "logEntry": "string (a 1-line description of what was ingested)"
-    }
-    
-    Ensure that one of the items in "updates" has the id "index" containing the full updated content of index.md.
-    5. Append \`\n\n---\n**Source:** [${url}](${url})\` to the bottom of the content of the summaryPage you create.`;
+     Content: ${text.substring(0, 5000)}
+     
+     CURRENT WIKI INDEX (index.md):
+     ${indexContent}
+     
+     Please:
+     1. Create a summary page for this source.
+     2. Identify key entities and concepts.
+     3. Update the existing index.md to include the new summary page and any new concepts, categorized appropriately.
+     4. Suggest updates for other existing wiki pages or new pages to create.
+     
+     Format your response as a JSON object exactly like this:
+     {
+       "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
+       "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
+       "deletePages": ["obsolete_page_id"],
+       "mergePages": [{ "target": "page_to_keep", "source": "page_to_absorb" }],
+       "logEntry": "string (a 1-line description of what was ingested)"
+     }
+     
+     MODES: Each update can have mode "append" (default, adds to end) or "replace" (overwrites entire page — use when content is outdated).
+     DELETE: If a page is now redundant or obsolete, add its ID to "deletePages".
+     MERGE: If two pages cover the same topic, use "mergePages" to combine them.
+     
+     Ensure that one of the items in "updates" has the id "index" containing the full updated content of index.md.
+     5. Append \`\n\n---\n**Source:** [${url}](${url})\` to the bottom of the content of the summaryPage you create.`;
 
     const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true);
     await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
+    
+    // Execute restructuring operations
+    await executeRestructuringOps(parsed);
+    
     if (parsed.logEntry) await appendToLog(parsed.logEntry);
 
     res.json({
@@ -196,6 +206,41 @@ function splitIntoSections(content: string, maxChunkLength: number): { chunks: s
   return { chunks: result, isStructural: true };
 }
 
+/**
+ * Executes restructuring operations (delete, merge, split) returned by the LLM.
+ */
+async function executeRestructuringOps(parsed: any) {
+  // Execute merges first (since merge includes delete of source)
+  if (parsed.mergePages && Array.isArray(parsed.mergePages)) {
+    for (const merge of parsed.mergePages) {
+      if (merge.target && merge.source) {
+        const result = await mergePages(merge.target, merge.source);
+        if (result.success) {
+          console.log(`[Ingest] Merged "${merge.source}" into "${merge.target}" (${result.rewrittenLinks} links rewritten)`);
+        }
+      }
+    }
+  }
+
+  // Execute split
+  if (parsed.splitPage && parsed.splitPage.sourceId && parsed.splitPage.sections) {
+    const result = await splitPage(parsed.splitPage.sourceId, parsed.splitPage.sections);
+    if (result.success) {
+      console.log(`[Ingest] Split "${parsed.splitPage.sourceId}" into ${result.createdPages.length} sub-pages`);
+    }
+  }
+
+  // Execute deletes last
+  if (parsed.deletePages && Array.isArray(parsed.deletePages)) {
+    for (const pageId of parsed.deletePages) {
+      const result = await deletePage(pageId);
+      if (result.success) {
+        console.log(`[Ingest] Deleted page "${pageId}" (${result.removedLinks} dead links cleaned)`);
+      }
+    }
+  }
+}
+
 const FIDELITY_INSTRUCTIONS = `
 CONTENT FIDELITY INSTRUCTIONS (CRITICAL):
 - You MUST preserve ALL code blocks, commands, SQL queries, and configuration snippets EXACTLY as they appear in the source. Include them in fenced code blocks with the appropriate language tag.
@@ -204,7 +249,8 @@ CONTENT FIDELITY INSTRUCTIONS (CRITICAL):
 - You MUST preserve ALL concrete examples, class names, method names, file paths, URLs, and configuration values.
 - Do NOT summarize or paraphrase technical content. The wiki page must contain the SAME level of detail as the original source.
 - Each wiki page should be COMPLETE and STANDALONE — a reader should NOT need to consult the original source file.
-- IMPORTANT: When updating an EXISTING page (either via summaryPage or updates), provide ONLY the NEW content to be added. The system will automatically APPEND your output to the bottom of the existing page. Never try to rewrite the full existing content.
+- IMPORTANT: When updating an EXISTING page with mode "append", provide ONLY the NEW content to be added. The system will automatically APPEND your output to the bottom of the existing page.
+- When using mode "replace", provide the COMPLETE new content for the page. A backup of the old content is automatically saved.
 `;
 
 // Ingest Files
@@ -285,19 +331,26 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
       ${localGraphContext}
       
       Please:
-      1. Create a summary page explaining this image.
+      1. Create a summary page explaining this image. Check the LOCAL GRAPH NEIGHBORHOOD Previews to see if any existing page already covers this topic — if so, reuse its ID with mode "append" or "replace" instead of creating a duplicate.
       2. Identify key entities and concepts.
       3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.
       4. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\n\n![${file.originalname}](/raw/${file.safeName})\` to the bottom of the content of the summaryPage you create.
       CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
         {
-          "summaryPage": { "id": "string", "content": "markdown" },
-          "updates": [ { "id": "string", "content": "markdown" } ],
+          "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
+          "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
+          "deletePages": [],
+          "mergePages": [],
           "logEntry": "string (a 1-line description of what was ingested)"
-        }\n\nDo your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
+        }
+        
+      MODES: Each update can have mode "append" (default) or "replace" (full page overwrite, use when existing content is outdated).
+      If you detect duplicate/redundant pages in the neighborhood, use "deletePages" or "mergePages" to clean up.
+      Do your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
 
           const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true, imagePayload);
           await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
+          await executeRestructuringOps(parsed);
           if (parsed.logEntry) await appendToLog(parsed.logEntry);
           const newPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
           updatedPages.push(...newPageIds);
@@ -343,26 +396,32 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
 
               if (part === 0) {
                 // First chunk/section always creates the hub page
-                chunkPrompt += `1. Create a summary/hub page for this source. This hub page MUST end with a "## Sections" header to prepare for child TOC entries.\n`;
+                chunkPrompt += `1. Create a summary/hub page for this source. IMPORTANT: Check the LOCAL GRAPH NEIGHBORHOOD Previews to see if an existing page already covers this topic. If so, reuse its ID with mode "replace" to update it with improved content. Only create a new page if nothing matches. This hub page MUST end with a "## Sections" header to prepare for child TOC entries.\n`;
               } else if (isStructural) {
                 // Structural mode: organize by topic
-                chunkPrompt += `1. For the "summaryPage", identify the primary topic of this section. Check the LOCAL GRAPH NEIGHBORHOOD to see if a page for this topic already exists.\n   - If a relevant page exists, reuse its ID. Your new detailed content will be automatically appended to it.\n   - If no relevant page exists, invent a new descriptive standalone ID.\n`;
+                chunkPrompt += `1. For the "summaryPage", identify the primary topic of this section. Check the LOCAL GRAPH NEIGHBORHOOD Previews (not just titles!) to see if a page for this topic already exists.\n   - If a relevant page exists and the content is complementary, reuse its ID with mode "append".\n   - If a relevant page exists but the content is outdated, reuse its ID with mode "replace".\n   - If no relevant page exists, invent a new descriptive standalone ID.\n`;
               } else {
                 // Size-based mode: append to the master page
-                chunkPrompt += `1. For the "summaryPage", use the exact id "${masterSummaryId}". Output ONLY the NEW information from this part, which the system will automatically append to the master summary page.\n`;
+                chunkPrompt += `1. For the "summaryPage", use the exact id "${masterSummaryId}" with mode "append". Output ONLY the NEW information from this part, which the system will automatically append to the master summary page.\n`;
               }
 
               chunkPrompt += `2. Identify key entities and concepts.\n3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.\n`;
               if (part > 0 && masterSummaryId) {
                 chunkPrompt += `4. IMPORTANT: You MUST include an update for the hub page ("${masterSummaryId}") containing EXACTLY ONE list item (e.g. "- [Your Topic](your_id): description") to append to its Table of Contents. Do NOT include any headers in this update.\n`;
               }
+              chunkPrompt += `5. If you detect duplicate or redundant pages in the LOCAL GRAPH NEIGHBORHOOD, use "deletePages" to remove them or "mergePages" to combine them.\n`;
               chunkPrompt += FIDELITY_INSTRUCTIONS;
               chunkPrompt += `CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
         {
-          "summaryPage": { "id": "string", "content": "markdown" },
-          "updates": [ { "id": "string", "content": "markdown" } ],
+          "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
+          "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
+          "deletePages": [],
+          "mergePages": [],
           "logEntry": "string (a 1-line description of what was ingested)"
-        }\n\nDo your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
+        }
+        
+      MODES: Each update can have mode "append" (default, adds to end of page) or "replace" (full page overwrite — use when content is outdated or needs restructuring). A backup is automatically created before any replace.
+      Do your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
 
               const parsed = await callLLM(provider, chunkPrompt, WIKI_SYSTEM_PROMPT, true);
 
@@ -371,6 +430,7 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
               }
 
               await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
+              await executeRestructuringOps(parsed);
               const chunkPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
               updatedPages.push(...chunkPageIds);
               fileUpdatedPages.push(...chunkPageIds);

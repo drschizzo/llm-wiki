@@ -4,7 +4,7 @@ import path from "path";
 import { WIKI_DIR, RAW_DIR } from "../config";
 import { callLLM } from "../services/llm.service";
 import { loadGraph, getSubgraphForText } from "../services/graph.service";
-import { applyWikiUpdates, appendToLog } from "../services/wiki.service";
+import { applyWikiUpdates, appendToLog, deletePage, mergePages, splitPage } from "../services/wiki.service";
 
 export const chatRouter = Router();
 
@@ -14,7 +14,7 @@ chatRouter.post("/", async (req, res) => {
 
   const lastUserMessage = history.length > 0 ? history[history.length - 1].content : "";
   const fullGraph = await loadGraph();
-  const localGraphContext = getSubgraphForText(lastUserMessage, fullGraph, 40);
+  const localGraphContext = await getSubgraphForText(lastUserMessage, fullGraph, 40);
   const chatId = `chat-${Date.now()}`;
 
   const systemPrompt = `You are a highly autonomous AI Wiki Assistant. You manage the user's personal knowledge base.
@@ -33,7 +33,27 @@ CRITICAL INSTRUCTIONS FOR AUTONOMY & CONNECTIVITY:
 1. NEVER ask for permission to update or create wiki pages. If the conversation contains new, valuable information, concepts, or corrections, you MUST update the wiki IMMEDIATELY by populating the "wikiUpdates" array.
 2. DO NOT say "I will analyze this" or "I'm reading" or "Let me check". Work silently.
 3. ISOLATED PAGES ARE PROHIBITED. If you create a NEW page, you MUST simultaneously update at least one EXISTING page (check the Local Graph Neighborhood) in the "wikiUpdates" array to add a link pointing to your newly created page. Conversely, your new page MUST link to existing pages. Use standard markdown links!
-4. IMPORTANT Source Tracking: For ANY new page you create, you MUST append \`\n\n---\n**Source:** [Conversation Transcript](/raw/${chatId}.md)\` to the bottom of the page content.
+4. IMPORTANT Source Tracking: For ANY new page you create, you MUST append \`\\n\\n---\\n**Source:** [Conversation Transcript](/raw/${chatId}.md)\` to the bottom of the page content.
+
+WIKI RESTRUCTURING OPERATIONS:
+You have powerful tools to keep the wiki clean and well-organized:
+
+5. **deletePages**: Use this to remove pages that are redundant, empty, outdated, or whose content has been fully integrated into another page. Provide an array of page IDs to delete. Dead links will be automatically cleaned.
+
+6. **mergePages**: Use this when two pages cover the same topic (e.g. "machine-learning" and "apprentissage-automatique", or partial duplicates). Provide an array of { "target": "page_to_keep", "source": "page_to_absorb" } objects. The source content will be appended to target, all links to source will be redirected to target, and source will be deleted.
+
+7. **splitPage**: Use this when a single page has grown too large (roughly over 3000 words / 15000 characters) and covers multiple distinct sub-topics. Provide the sourceId and an array of sections, each with an id, title, and content. The original page will become a hub/TOC linking to the sub-pages.
+
+8. **mode: "replace"** in wikiUpdates: When updating an existing page, you can set mode to "replace" to COMPLETELY OVERWRITE the page content instead of appending. Use this when the existing content is obsolete, badly structured, or needs full reorganization. A backup is automatically created before replacement.
+   - Default mode is "append" (adds content to the end of the page).
+   - Use "replace" sparingly — only when the page truly needs a full rewrite.
+
+WHEN TO USE EACH OPERATION:
+- Page is redundant/empty/obsolete → deletePages
+- Two pages cover the same topic → mergePages (keep the better one as target)
+- A page is too long with multiple sub-topics → splitPage
+- A page has outdated/badly structured content → wikiUpdates with mode "replace"
+- Adding new information to an existing page → wikiUpdates with mode "append" (default)
 
 Format your response as a JSON object exactly like this:
 {
@@ -41,12 +61,21 @@ Format your response as a JSON object exactly like this:
   "readPages": ["page_id_1", "page_id_2"],
   "responseMessage": "Your final reply to the user... (leave empty if you are exploring or reading)",
   "wikiUpdates": [
-    { "id": "page_id_to_create_or_update", "content": "full markdown content..." }
+    { "id": "page_id_to_create_or_update", "content": "full markdown content...", "mode": "append" }
   ],
+  "deletePages": ["obsolete_page_id"],
+  "mergePages": [{ "target": "page_to_keep", "source": "page_to_absorb" }],
+  "splitPage": {
+    "sourceId": "too_big_page",
+    "sections": [
+      { "id": "sub_topic_a", "title": "Sub Topic A", "content": "..." },
+      { "id": "sub_topic_b", "title": "Sub Topic B", "content": "..." }
+    ]
+  },
   "logEntry": "1-line summary of what you changed (only if you made updates)"
 }
 
-If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "logEntry".`;
+If no updates are needed, leave "wikiUpdates" as an empty array [], omit "logEntry", and leave restructuring fields empty or as empty arrays.`;
 
   let currentPrompt = history.map((msg: any) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n') + '\n\nAssistant:';
 
@@ -66,6 +95,11 @@ If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "log
     let allWikiUpdates: any[] = [];
     let updatedPagesTracker = new Set<string>();
     let generatedLogEntry = "";
+
+    // Accumulate restructuring operations across loops
+    let allDeletePages: string[] = [];
+    let allMergePages: { target: string; source: string }[] = [];
+    let pendingSplit: { sourceId: string; sections: { id: string; title: string; content: string }[] } | null = null;
 
     while (loopCount < MAX_LOOPS) {
       loopCount++;
@@ -88,6 +122,17 @@ If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "log
         }
       }
 
+      // Collect restructuring operations
+      if (parsed.deletePages && Array.isArray(parsed.deletePages)) {
+        allDeletePages.push(...parsed.deletePages);
+      }
+      if (parsed.mergePages && Array.isArray(parsed.mergePages)) {
+        allMergePages.push(...parsed.mergePages);
+      }
+      if (parsed.splitPage && parsed.splitPage.sourceId && parsed.splitPage.sections) {
+        pendingSplit = parsed.splitPage;
+      }
+
       // Continue looping if tools are requested, regardless of responseMessage
       if (requestedPages.length > 0 || requestedExplore.length > 0) {
         let extraContext = "\n\n[System: Action Results:]\n";
@@ -95,7 +140,7 @@ If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "log
         if (requestedExplore.length > 0) {
           for (const id of requestedExplore) {
             // Using getSubgraphForText on the ID text essentially pulls its direct neighbors
-            const nodeSubgraph = getSubgraphForText(id + " " + (fullGraph.nodes[id]?.title || ""), fullGraph, 20);
+            const nodeSubgraph = await getSubgraphForText(id + " " + (fullGraph.nodes[id]?.title || ""), fullGraph, 20);
             extraContext += `\n--- GRAPH EXPLORATION: ${id} ---\n${nodeSubgraph}\n`;
           }
         }
@@ -122,11 +167,50 @@ If no updates are needed, leave "wikiUpdates" as an empty array [] and omit "log
       }
     }
 
+    // Execute all accumulated operations in the correct order:
+    // 1. Apply wiki updates first (create/update pages)
     if (allWikiUpdates.length > 0) {
       await applyWikiUpdates(allWikiUpdates);
-      
+    }
+
+    // 2. Execute merges (before deletes, since merge includes delete of source)
+    for (const merge of allMergePages) {
+      const result = await mergePages(merge.target, merge.source);
+      if (result.success) {
+        updatedPagesTracker.add(merge.target);
+        updatedPagesTracker.delete(merge.source);
+        console.log(`[Chat Agent] Merged "${merge.source}" into "${merge.target}" (${result.rewrittenLinks} links rewritten)`);
+      }
+    }
+
+    // 3. Execute split
+    if (pendingSplit) {
+      const result = await splitPage(pendingSplit.sourceId, pendingSplit.sections);
+      if (result.success) {
+        updatedPagesTracker.add(pendingSplit.sourceId);
+        for (const p of result.createdPages) updatedPagesTracker.add(p);
+        console.log(`[Chat Agent] Split "${pendingSplit.sourceId}" into ${result.createdPages.length} sub-pages`);
+      }
+    }
+
+    // 4. Execute deletes last
+    for (const pageId of allDeletePages) {
+      const result = await deletePage(pageId);
+      if (result.success) {
+        updatedPagesTracker.delete(pageId);
+        console.log(`[Chat Agent] Deleted page "${pageId}" (${result.removedLinks} dead links cleaned)`);
+      }
+    }
+
+    // Log the changes
+    if (allWikiUpdates.length > 0 || allDeletePages.length > 0 || allMergePages.length > 0 || pendingSplit) {
       const pageList = Array.from(updatedPagesTracker).join(", ");
       let logMsg = generatedLogEntry ? `${generatedLogEntry} (Pages: ${pageList})` : `Agent updated pages: ${pageList}`;
+      
+      if (allDeletePages.length > 0) logMsg += ` | Deleted: ${allDeletePages.join(', ')}`;
+      if (allMergePages.length > 0) logMsg += ` | Merged: ${allMergePages.map(m => `${m.source}→${m.target}`).join(', ')}`;
+      if (pendingSplit) logMsg += ` | Split: ${pendingSplit.sourceId}`;
+      
       await appendToLog(logMsg);
     }
 
