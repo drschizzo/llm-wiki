@@ -61,9 +61,8 @@ export async function callLLM(
       messages,
       temperature: 0.7
     };
-    if (jsonMode) {
-      payload.response_format = { type: "json_object" };
-    }
+    // Note: response_format is not sent for LM Studio as it only supports
+    // 'json_schema' and 'text'. JSON output is enforced via system prompt instead.
     
     const response = await axios.post(apiUrl, payload);
     text = response.data.choices[0].message.content;
