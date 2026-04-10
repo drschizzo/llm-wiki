@@ -93,6 +93,26 @@ export async function callLLM(
     try {
       return JSON.parse(jsonStr);
     } catch (e) {
+      // Retry with balanced brace matching — find the } that closes the first {
+      if (firstBrace !== -1) {
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = firstBrace; i < jsonStr.length + firstBrace + 1 && i < text.length; i++) {
+          const ch = text[i];
+          if (escape) { escape = false; continue; }
+          if (ch === '\\') { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === '{') depth++;
+          if (ch === '}') { depth--; if (depth === 0) {
+            try {
+              return JSON.parse(text.substring(firstBrace, i + 1));
+            } catch (e2) { break; }
+          }}
+        }
+      }
+      
       const debugFile = path.join(DATA_DIR, `failed_json_${Date.now()}.txt`);
       try { await fs.writeFile(debugFile, text, "utf-8"); } catch (err) { }
       console.error(`Failed to parse JSON. Raw output saved to ${debugFile}`);

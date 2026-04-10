@@ -5,70 +5,266 @@ import multer from "multer";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import AdmZip from "adm-zip";
-import { DATA_DIR, RAW_DIR, WIKI_DIR, WIKI_SYSTEM_PROMPT } from "../config";
+import { DATA_DIR, RAW_DIR, WIKI_DIR, WIKI_SYSTEM_PROMPT, WIKI_TOOLS_SPEC } from "../config";
 import { callLLM } from "../services/llm.service";
-import { loadGraph, getSubgraphForText } from "../services/graph.service";
+import { loadGraph, getSubgraphForText, getPageSnippet } from "../services/graph.service";
 import { applyWikiUpdates, appendToLog, getFileHash, loadProcessedHashes, saveProcessedHash, deletePage, mergePages, splitPage } from "../services/wiki.service";
 
 export const ingestRouter = Router();
 const upload = multer({ dest: RAW_DIR });
 
-// Ingest URL
-ingestRouter.post("/url", async (req, res) => {
-  const { url, provider = "gemini" } = req.body;
-  try {
-    const response = await axios.get(url);
-    const $ = cheerio.load(response.data);
-    const title = $("title").text();
-    const text = $("body").text().replace(/\s+/g, ' ').trim();
+// --- Shared agentic loop for ingestion ---
 
-    // Read current index to give LLM context
-    const indexContent = await fs.readFile(path.join(WIKI_DIR, "index.md"), "utf-8").catch(() => "# Wiki Index");
+const MAX_AGENT_LOOPS = 4;
 
-    const prompt = `I have a new source titled "${title}". 
-     Content: ${text.substring(0, 5000)}
-     
-     CURRENT WIKI INDEX (index.md):
-     ${indexContent}
-     
-     Please:
-     1. Create a summary page for this source.
-     2. Identify key entities and concepts.
-     3. Update the existing index.md to include the new summary page and any new concepts, categorized appropriately.
-     4. Suggest updates for other existing wiki pages or new pages to create.
-     
-     Format your response as a JSON object exactly like this:
-     {
-       "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
-       "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
-       "deletePages": ["obsolete_page_id"],
-       "mergePages": [{ "target": "page_to_keep", "source": "page_to_absorb" }],
-       "logEntry": "string (a 1-line description of what was ingested)"
-     }
-     
-     MODES: Each update can have mode "append" (default, adds to end) or "replace" (overwrites entire page — use when content is outdated).
-     DELETE: If a page is now redundant or obsolete, add its ID to "deletePages".
-     MERGE: If two pages cover the same topic, use "mergePages" to combine them.
-     
-     Ensure that one of the items in "updates" has the id "index" containing the full updated content of index.md.
-     5. Append \`\n\n---\n**Source:** [${url}](${url})\` to the bottom of the content of the summaryPage you create.`;
+/**
+ * Runs an agentic LLM loop (explore → read → act) on a given prompt/context.
+ * Same loop structure as chat, but without user interaction.
+ * Returns all accumulated operations from all loop iterations.
+ */
+async function runAgentLoop(
+  provider: string,
+  initialPrompt: string,
+  systemPrompt: string,
+  imagePayload?: { base64: string; mimeType: string }
+): Promise<{
+  allWikiUpdates: any[];
+  allDeletePages: string[];
+  allMergePages: { target: string; source: string }[];
+  pendingSplit: any | null;
+  documentOutline: string;
+  logEntry: string;
+}> {
+  let currentPrompt = initialPrompt;
+  let allWikiUpdates: any[] = [];
+  let allDeletePages: string[] = [];
+  let allMergePages: { target: string; source: string }[] = [];
+  let pendingSplit: any | null = null;
+  let documentOutline = "";
+  let logEntry = "";
 
-    const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true);
-    await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
-    
-    // Execute restructuring operations
-    await executeRestructuringOps(parsed);
-    
-    if (parsed.logEntry) await appendToLog(parsed.logEntry);
+  const fullGraph = await loadGraph();
 
-    res.json({
-      success: true,
-      updatedPages: [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean)
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: "Failed to ingest URL", details: err.message });
+  for (let loop = 0; loop < MAX_AGENT_LOOPS; loop++) {
+    const parsed = await callLLM(provider, currentPrompt, systemPrompt, true, loop === 0 ? imagePayload : undefined);
+
+    // Collect wiki updates
+    if (parsed.wikiUpdates && parsed.wikiUpdates.length > 0) {
+      for (const update of parsed.wikiUpdates) {
+        const existingIdx = allWikiUpdates.findIndex((u: any) => u.id === update.id);
+        if (existingIdx >= 0) allWikiUpdates[existingIdx] = update;
+        else allWikiUpdates.push(update);
+      }
+    }
+
+    // Collect restructuring ops
+    if (parsed.deletePages && Array.isArray(parsed.deletePages)) {
+      allDeletePages.push(...parsed.deletePages);
+    }
+    if (parsed.mergePages && Array.isArray(parsed.mergePages)) {
+      allMergePages.push(...parsed.mergePages);
+    }
+    if (parsed.splitPage && parsed.splitPage.sourceId && parsed.splitPage.sections) {
+      pendingSplit = parsed.splitPage;
+    }
+
+    // Track outline and log
+    if (parsed.documentOutline) documentOutline = parsed.documentOutline;
+    if (parsed.logEntry) logEntry = parsed.logEntry;
+
+    // Check if agent wants to explore/read more
+    const requestedPages = parsed.readPages || [];
+    const requestedExplore = parsed.exploreGraph || [];
+
+    if (requestedPages.length > 0 || requestedExplore.length > 0) {
+      let extraContext = "\n\n[System: Action Results:]\n";
+
+      for (const id of requestedExplore) {
+        const nodeSubgraph = await getSubgraphForText(id + " " + (fullGraph.nodes[id]?.title || ""), fullGraph, 20);
+        extraContext += `\n--- GRAPH EXPLORATION: ${id} ---\n${nodeSubgraph}\n`;
+      }
+
+      for (const pageId of requestedPages) {
+        const content = await fs.readFile(path.join(WIKI_DIR, `${pageId}.md`), "utf-8").catch(() => null);
+        if (content) {
+          extraContext += `\n--- PAGE: ${pageId} ---\n${content}\n`;
+        } else {
+          extraContext += `\n--- PAGE: ${pageId} ---\n(Page does not exist)\n`;
+        }
+      }
+
+      extraContext += "\nNow provide your \"wikiUpdates\" and any restructuring operations. If you STILL need to explore/read more, leave wikiUpdates empty and populate exploreGraph/readPages again.\nAssistant:";
+      currentPrompt += extraContext;
+    } else {
+      break; // Agent is done
+    }
   }
-});
+
+  return { allWikiUpdates, allDeletePages, allMergePages, pendingSplit, documentOutline, logEntry };
+}
+
+/**
+ * Executes the accumulated restructuring operations in the correct order.
+ */
+async function executeRestructuringOps(
+  allDeletePages: string[],
+  allMergePages: { target: string; source: string }[],
+  pendingSplit: any | null
+): Promise<Set<string>> {
+  const affectedPages = new Set<string>();
+
+  // 1. Merges first
+  for (const merge of allMergePages) {
+    const result = await mergePages(merge.target, merge.source);
+    if (result.success) {
+      affectedPages.add(merge.target);
+      console.log(`[Ingest] Merged "${merge.source}" into "${merge.target}" (${result.rewrittenLinks} links rewritten)`);
+    }
+  }
+
+  // 2. Split
+  if (pendingSplit && pendingSplit.sourceId && pendingSplit.sections) {
+    const result = await splitPage(pendingSplit.sourceId, pendingSplit.sections);
+    if (result.success) {
+      affectedPages.add(pendingSplit.sourceId);
+      for (const p of result.createdPages) affectedPages.add(p);
+      console.log(`[Ingest] Split "${pendingSplit.sourceId}" into ${result.createdPages.length} sub-pages`);
+    }
+  }
+
+  // 3. Deletes last
+  for (const pageId of allDeletePages) {
+    const result = await deletePage(pageId);
+    if (result.success) {
+      console.log(`[Ingest] Deleted page "${pageId}" (${result.removedLinks} dead links cleaned)`);
+    }
+  }
+
+  return affectedPages;
+}
+
+// --- Post-ingestion consolidation pass ---
+
+/**
+ * After ingesting a file, reviews all pages that were just created/updated
+ * and asks the LLM to identify near-duplicates or pages that should be merged.
+ * This is a general-purpose deduplication mechanism that works regardless
+ * of document format or content type.
+ */
+async function runConsolidationPass(
+  provider: string,
+  pageIds: string[]
+): Promise<void> {
+  // Filter out system pages and deduplicate
+  const uniquePages = [...new Set(pageIds)].filter(id => id !== 'index' && id !== 'log');
+  
+  // Only consolidate if there are at least 3 pages (otherwise merging is unlikely needed)
+  if (uniquePages.length < 3) return;
+
+  console.log(`[Consolidation] Reviewing ${uniquePages.length} pages for potential merges...`);
+
+  // Build a summary of all pages for the LLM
+  const currentGraph = await loadGraph();
+  let pageSummaries = "";
+  for (const pageId of uniquePages) {
+    const node = currentGraph.nodes[pageId];
+    const title = node?.title || pageId;
+    const snippet = await getPageSnippet(pageId, 300);
+    const links = currentGraph.edges[pageId] || [];
+    pageSummaries += `- ID: "${pageId}" | Title: "${title}" | Preview: "${snippet}" | Links: [${links.join(', ')}]\n`;
+  }
+
+  const prompt = `You just helped ingest a document and the following wiki pages were created or updated:
+
+${pageSummaries}
+
+TASK: Review these pages for quality and coherence. Identify any issues:
+1. **Near-duplicate pages**: Two pages covering essentially the same topic with different IDs (e.g. "config-ide" and "intellij-config" are likely duplicates). These MUST be merged.
+2. **Pages that are too small** to stand alone (less than ~100 words of useful content) and should be merged into a related, larger page.
+
+For each issue found, use the appropriate operation:
+- "mergePages" to combine near-duplicates (keep the one with the better ID/title as target)
+- "wikiUpdates" with mode "replace" if a page needs its content restructured after a merge
+
+If no issues are found, return empty arrays.
+
+Respond with JSON:
+{
+  "mergePages": [{ "target": "page_to_keep", "source": "page_to_absorb" }],
+  "wikiUpdates": [],
+  "deletePages": [],
+  "logEntry": "1-line description of consolidation actions taken, or empty if none"
+}`;
+
+  try {
+    const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true);
+    
+    let actionsPerformed = false;
+
+    // Execute merges
+    if (parsed.mergePages && Array.isArray(parsed.mergePages) && parsed.mergePages.length > 0) {
+      for (const merge of parsed.mergePages) {
+        if (merge.target && merge.source) {
+          const result = await mergePages(merge.target, merge.source);
+          if (result.success) {
+            actionsPerformed = true;
+            console.log(`[Consolidation] Merged "${merge.source}" into "${merge.target}" (${result.rewrittenLinks} links rewritten)`);
+          }
+        }
+      }
+    }
+
+    // Execute any content updates
+    if (parsed.wikiUpdates && parsed.wikiUpdates.length > 0) {
+      await applyWikiUpdates(parsed.wikiUpdates);
+      actionsPerformed = true;
+    }
+
+    // Execute deletes
+    if (parsed.deletePages && Array.isArray(parsed.deletePages) && parsed.deletePages.length > 0) {
+      for (const pageId of parsed.deletePages) {
+        const result = await deletePage(pageId);
+        if (result.success) {
+          actionsPerformed = true;
+          console.log(`[Consolidation] Deleted "${pageId}"`);
+        }
+      }
+    }
+
+    if (parsed.logEntry && actionsPerformed) {
+      await appendToLog(`[Consolidation] ${parsed.logEntry}`);
+    }
+
+    if (!actionsPerformed) {
+      console.log(`[Consolidation] No issues found.`);
+    }
+  } catch (err: any) {
+    console.error(`[Consolidation] Failed: ${err.message} — skipping.`);
+  }
+}
+
+// --- Simple size-based chunking (only used when content exceeds MAX_CHUNK_LENGTH) ---
+
+function chunkBySize(content: string, maxChunkLength: number): string[] {
+  if (content.length <= maxChunkLength) return [content];
+
+  const chunks: string[] = [];
+  let r = 0;
+  while (r < content.length) {
+    let end = Math.min(r + maxChunkLength, content.length);
+    if (end < content.length) {
+      const lastNewline = content.lastIndexOf('\n', end);
+      if (lastNewline > r + maxChunkLength * 0.8) {
+        end = lastNewline + 1;
+      }
+    }
+    chunks.push(content.substring(r, end));
+    r = end;
+  }
+  return chunks;
+}
+
+// --- Helper to recursively list files (for zip extraction) ---
 
 async function processFilesRecursive(dir: string): Promise<string[]> {
   const dirents = await fs.readdir(dir, { withFileTypes: true });
@@ -85,175 +281,54 @@ async function processFilesRecursive(dir: string): Promise<string[]> {
   return files;
 }
 
-/**
- * Adaptive content splitting: tries semantic section detection first,
- * falls back to size-based chunking.
- *
- * Level 1: H2 markdown headers (## ) — needs at least 3 occurrences
- * Level 2: Separators (--- or ===) — needs at least 2 occurrences
- * Fallback: raw size-based chunking (existing behavior)
- *
- * Post-processing:
- * - Sections < 200 chars are merged with the next section
- * - Sections > maxChunkLength are re-split by size
- */
-function splitIntoSections(content: string, maxChunkLength: number): { chunks: string[], isStructural: boolean } {
-  let sections: string[] = [];
-  let isStructural = false;
+// --- Ingest URL ---
 
-  // Level 1: H2 markdown headers (## )
-  const h2Regex = /^## /gm;
-  const h2Positions: number[] = [];
-  let match;
-  while ((match = h2Regex.exec(content)) !== null) {
-    h2Positions.push(match.index);
+ingestRouter.post("/url", async (req, res) => {
+  const { url, provider = "gemini" } = req.body;
+  try {
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
+    const title = $("title").text();
+    const text = $("body").text().replace(/\s+/g, ' ').trim();
+
+    const fullGraph = await loadGraph();
+    const localGraphContext = await getSubgraphForText(text.substring(0, 3000), fullGraph, 30);
+
+    const prompt = `I have a new web source to ingest into the wiki.
+Title: "${title}"
+URL: ${url}
+Content:
+${text.substring(0, 5000)}
+
+${localGraphContext}
+
+${WIKI_TOOLS_SPEC}
+
+INGEST INSTRUCTIONS:
+1. Analyze this content and organize it into appropriate wiki pages.
+2. Check the LOCAL GRAPH NEIGHBORHOOD to see if existing pages already cover these topics — reuse/append to them instead of creating duplicates.
+3. Ensure all new pages are linked to the existing graph.
+4. For any new page you create, append \`\\n\\n---\\n**Source:** [${url}](${url})\` at the bottom of the content.
+5. Do NOT use "responseMessage" — this is an automated ingestion, not a chat.`;
+
+    const result = await runAgentLoop(provider, prompt, WIKI_SYSTEM_PROMPT);
+
+    if (result.allWikiUpdates.length > 0) {
+      await applyWikiUpdates(result.allWikiUpdates);
+    }
+    await executeRestructuringOps(result.allDeletePages, result.allMergePages, result.pendingSplit);
+    if (result.logEntry) await appendToLog(result.logEntry);
+
+    const updatedPages = result.allWikiUpdates.map((u: any) => u.id).filter(Boolean);
+
+    res.json({ success: true, updatedPages });
+  } catch (err: any) {
+    res.status(500).json({ error: "Failed to ingest URL", details: err.message });
   }
+});
 
-  if (h2Positions.length >= 3) {
-    isStructural = true;
-    // Text before the first H2 is the introduction
-    const intro = content.substring(0, h2Positions[0]).trim();
-    if (intro.length > 0) sections.push(intro);
-    // Each H2 section runs until the next H2 or end of file
-    for (let i = 0; i < h2Positions.length; i++) {
-      const start = h2Positions[i];
-      const end = i + 1 < h2Positions.length ? h2Positions[i + 1] : content.length;
-      sections.push(content.substring(start, end).trim());
-    }
-  } else {
-    // Level 2: Separators (--- or ===, at least 3 chars on their own line)
-    const sepRegex = /^-{3,}$|^={3,}$/gm;
-    const sepPositions: { start: number; end: number }[] = [];
-    while ((match = sepRegex.exec(content)) !== null) {
-      sepPositions.push({ start: match.index, end: match.index + match[0].length });
-    }
+// --- Ingest Files ---
 
-    if (sepPositions.length >= 2) {
-      isStructural = true;
-      let lastEnd = 0;
-      for (const sep of sepPositions) {
-        const section = content.substring(lastEnd, sep.start).trim();
-        if (section.length > 0) sections.push(section);
-        lastEnd = sep.end;
-      }
-      const remaining = content.substring(sepPositions[sepPositions.length - 1].end).trim();
-      if (remaining.length > 0) sections.push(remaining);
-    }
-  }
-
-  // No structure detected — fall back to size-based chunking
-  if (!isStructural) {
-    const chunks: string[] = [];
-    let r = 0;
-    while (r < content.length) {
-      let end = Math.min(r + maxChunkLength, content.length);
-      if (end < content.length) {
-        const lastNewline = content.lastIndexOf('\n', end);
-        if (lastNewline > r + maxChunkLength * 0.8) {
-          end = lastNewline + 1;
-        }
-      }
-      chunks.push(content.substring(r, end));
-      r = end;
-    }
-    return { chunks, isStructural: false };
-  }
-
-  // Post-processing: merge small sections (<200 chars) with the next one
-  const MIN_SECTION_LENGTH = 200;
-  const merged: string[] = [];
-  let buffer = "";
-  for (const section of sections) {
-    if (buffer.length > 0) {
-      buffer += "\n\n" + section;
-    } else {
-      buffer = section;
-    }
-    if (buffer.length >= MIN_SECTION_LENGTH) {
-      merged.push(buffer);
-      buffer = "";
-    }
-  }
-  if (buffer.length > 0) {
-    if (merged.length > 0) {
-      merged[merged.length - 1] += "\n\n" + buffer;
-    } else {
-      merged.push(buffer);
-    }
-  }
-
-  // Re-split any sections that still exceed maxChunkLength
-  const result: string[] = [];
-  for (const section of merged) {
-    if (section.length > maxChunkLength) {
-      let r = 0;
-      while (r < section.length) {
-        let end = Math.min(r + maxChunkLength, section.length);
-        if (end < section.length) {
-          const lastNewline = section.lastIndexOf('\n', end);
-          if (lastNewline > r + maxChunkLength * 0.8) {
-            end = lastNewline + 1;
-          }
-        }
-        result.push(section.substring(r, end));
-        r = end;
-      }
-    } else {
-      result.push(section);
-    }
-  }
-
-  return { chunks: result, isStructural: true };
-}
-
-/**
- * Executes restructuring operations (delete, merge, split) returned by the LLM.
- */
-async function executeRestructuringOps(parsed: any) {
-  // Execute merges first (since merge includes delete of source)
-  if (parsed.mergePages && Array.isArray(parsed.mergePages)) {
-    for (const merge of parsed.mergePages) {
-      if (merge.target && merge.source) {
-        const result = await mergePages(merge.target, merge.source);
-        if (result.success) {
-          console.log(`[Ingest] Merged "${merge.source}" into "${merge.target}" (${result.rewrittenLinks} links rewritten)`);
-        }
-      }
-    }
-  }
-
-  // Execute split
-  if (parsed.splitPage && parsed.splitPage.sourceId && parsed.splitPage.sections) {
-    const result = await splitPage(parsed.splitPage.sourceId, parsed.splitPage.sections);
-    if (result.success) {
-      console.log(`[Ingest] Split "${parsed.splitPage.sourceId}" into ${result.createdPages.length} sub-pages`);
-    }
-  }
-
-  // Execute deletes last
-  if (parsed.deletePages && Array.isArray(parsed.deletePages)) {
-    for (const pageId of parsed.deletePages) {
-      const result = await deletePage(pageId);
-      if (result.success) {
-        console.log(`[Ingest] Deleted page "${pageId}" (${result.removedLinks} dead links cleaned)`);
-      }
-    }
-  }
-}
-
-const FIDELITY_INSTRUCTIONS = `
-CONTENT FIDELITY INSTRUCTIONS (CRITICAL):
-- You MUST preserve ALL code blocks, commands, SQL queries, and configuration snippets EXACTLY as they appear in the source. Include them in fenced code blocks with the appropriate language tag.
-- You MUST preserve step-by-step procedures with ALL their numbered steps. Do NOT summarize "steps 1-5" into one sentence.
-- You MUST preserve author attributions (e.g. "Auteur : X") when present.
-- You MUST preserve ALL concrete examples, class names, method names, file paths, URLs, and configuration values.
-- Do NOT summarize or paraphrase technical content. The wiki page must contain the SAME level of detail as the original source.
-- Each wiki page should be COMPLETE and STANDALONE — a reader should NOT need to consult the original source file.
-- IMPORTANT: When updating an EXISTING page with mode "append", provide ONLY the NEW content to be added. The system will automatically APPEND your output to the bottom of the existing page.
-- When using mode "replace", provide the COMPLETE new content for the page. A backup of the old content is automatically saved.
-`;
-
-// Ingest Files
 ingestRouter.post("/files", upload.array("files"), async (req, res) => {
   const uploadedFiles = (req as any).files as any[];
   const provider = req.body.provider || "gemini";
@@ -312,130 +387,100 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
         console.log(`${logPrefix} - Processing "${file.originalname}"...`);
 
         const fileUpdatedPages: string[] = [];
-        const fullGraph = await loadGraph();
-        let documentContext = "";
-
         const ext = path.extname(file.originalname).toLowerCase();
-        let prompt = "";
-        let imagePayload: { base64: string; mimeType: string } | undefined = undefined;
 
         if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+          // --- Image ingestion ---
           const fileBuffer = await fs.readFile(file.path);
-          imagePayload = { base64: fileBuffer.toString("base64"), mimeType: `image/${ext.slice(1).replace('jpg', 'jpeg')}` };
-          documentContext = file.originalname;
-          const localGraphContext = getSubgraphForText(documentContext, fullGraph, 30);
+          const imagePayload = { base64: fileBuffer.toString("base64"), mimeType: `image/${ext.slice(1).replace('jpg', 'jpeg')}` };
 
-          prompt = `I have a new image source named "${file.originalname}". 
-      Please analyze this image, extract the knowledge or diagrams it contains.
-      
-      ${localGraphContext}
-      
-      Please:
-      1. Create a summary page explaining this image. Check the LOCAL GRAPH NEIGHBORHOOD Previews to see if any existing page already covers this topic — if so, reuse its ID with mode "append" or "replace" instead of creating a duplicate.
-      2. Identify key entities and concepts.
-      3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.
-      4. Append \`\n\n---\n**Source:** [${file.originalname}](/raw/${file.safeName})\n\n![${file.originalname}](/raw/${file.safeName})\` to the bottom of the content of the summaryPage you create.
-      CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
-        {
-          "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
-          "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
-          "deletePages": [],
-          "mergePages": [],
-          "logEntry": "string (a 1-line description of what was ingested)"
-        }
-        
-      MODES: Each update can have mode "append" (default) or "replace" (full page overwrite, use when existing content is outdated).
-      If you detect duplicate/redundant pages in the neighborhood, use "deletePages" or "mergePages" to clean up.
-      Do your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
+          const fullGraph = await loadGraph();
+          const localGraphContext = await getSubgraphForText(file.originalname, fullGraph, 30);
 
-          const parsed = await callLLM(provider, prompt, WIKI_SYSTEM_PROMPT, true, imagePayload);
-          await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
-          await executeRestructuringOps(parsed);
-          if (parsed.logEntry) await appendToLog(parsed.logEntry);
-          const newPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
-          updatedPages.push(...newPageIds);
-          fileUpdatedPages.push(...newPageIds);
-          console.log(`${logPrefix} - Success. Generated summary: ${parsed.summaryPage?.id}`);
+          const prompt = `I have a new image source named "${file.originalname}" to ingest into the wiki.
+Please analyze this image, extract the knowledge or diagrams it contains.
+
+${localGraphContext}
+
+${WIKI_TOOLS_SPEC}
+
+INGEST INSTRUCTIONS:
+1. Create wiki page(s) documenting this image's content. Check the LOCAL GRAPH NEIGHBORHOOD to see if existing pages already cover this topic.
+2. Ensure all new pages link to the existing graph.
+3. For any new page, append \`\\n\\n---\\n**Source:** [${file.originalname}](/raw/${file.safeName})\\n\\n![${file.originalname}](/raw/${file.safeName})\` at the bottom.
+4. Do NOT use "responseMessage".`;
+
+          const result = await runAgentLoop(provider, prompt, WIKI_SYSTEM_PROMPT, imagePayload);
+
+          if (result.allWikiUpdates.length > 0) {
+            await applyWikiUpdates(result.allWikiUpdates);
+            const pageIds = result.allWikiUpdates.map((u: any) => u.id).filter(Boolean);
+            updatedPages.push(...pageIds);
+            fileUpdatedPages.push(...pageIds);
+          }
+          await executeRestructuringOps(result.allDeletePages, result.allMergePages, result.pendingSplit);
+          if (result.logEntry) await appendToLog(result.logEntry);
+
+          console.log(`${logPrefix} - Image processed. Pages: ${fileUpdatedPages.join(', ')}`);
 
         } else {
+          // --- Text file ingestion ---
           try {
             const content = await fs.readFile(file.path, "utf-8");
             const MAX_CHUNK_LENGTH = process.env.MAX_CHUNK_LENGTH ? parseInt(process.env.MAX_CHUNK_LENGTH) : 30000;
+            const chunks = chunkBySize(content, MAX_CHUNK_LENGTH);
 
-            const { chunks, isStructural } = splitIntoSections(content, MAX_CHUNK_LENGTH);
+            console.log(`${logPrefix} - ${chunks.length === 1 ? 'Single chunk' : `Split into ${chunks.length} chunks`}.`);
 
-            console.log(`${logPrefix} - Split into ${chunks.length} ${isStructural ? 'sections' : 'chunks'}.`);
-
-            let masterSummaryId = "";
+            // Incremental document outline — built across chunks for context continuity
+            let documentOutline = "";
 
             for (let part = 0; part < chunks.length; part++) {
               const chunkText = chunks[part];
-              const label = isStructural ? "Section" : "Part";
-              const chunkLogPrefix = chunks.length > 1 ? `${logPrefix} (${label} ${part + 1}/${chunks.length})` : logPrefix;
+              const chunkLogPrefix = chunks.length > 1 ? `${logPrefix} (Chunk ${part + 1}/${chunks.length})` : logPrefix;
 
               console.log(`${chunkLogPrefix} - Processing...`);
 
-              // Load graph freshly per-chunk so inter-chunk links exist!
+              // Reload graph per-chunk so pages created in previous chunks are visible
               const currentGraph = await loadGraph();
-              const localGraphContext = getSubgraphForText(chunkText.substring(0, 5000), currentGraph, 30);
+              const localGraphContext = await getSubgraphForText(chunkText.substring(0, 5000), currentGraph, 30);
 
-              let chunkPrompt = `I have a source file named "${file.originalname}".\n`;
+              let prompt = `I have a source file named "${file.originalname}" to ingest into the wiki.\n`;
 
               if (chunks.length > 1) {
-                if (isStructural) {
-                  chunkPrompt += `This file contains ${chunks.length} distinct sections. You are processing SECTION ${part + 1} of ${chunks.length}.\n`;
-                } else {
-                  chunkPrompt += `This is PART ${part + 1} of ${chunks.length}.\n`;
-                }
-                if (part > 0) {
-                  chunkPrompt += `\nCONTEXT: The main hub/summary page was created with ID "${masterSummaryId}". You must link to it and to concepts already created in previous sections.\n`;
+                prompt += `This is CHUNK ${part + 1} of ${chunks.length} of a large document.\n`;
+                if (documentOutline) {
+                  prompt += `\nDOCUMENT OUTLINE (built from previous chunks — use this to understand the full document context and avoid creating redundant pages):\n${documentOutline}\n\n`;
                 }
               }
 
-              chunkPrompt += `Content:\n${chunkText}\n\n${localGraphContext}\n\nPlease:\n`;
+              prompt += `Content:\n${chunkText}\n\n${localGraphContext}\n\n${WIKI_TOOLS_SPEC}\n`;
 
-              if (part === 0) {
-                // First chunk/section always creates the hub page
-                chunkPrompt += `1. Create a summary/hub page for this source. IMPORTANT: Check the LOCAL GRAPH NEIGHBORHOOD Previews to see if an existing page already covers this topic. If so, reuse its ID with mode "replace" to update it with improved content. Only create a new page if nothing matches. This hub page MUST end with a "## Sections" header to prepare for child TOC entries.\n`;
-              } else if (isStructural) {
-                // Structural mode: organize by topic
-                chunkPrompt += `1. For the "summaryPage", identify the primary topic of this section. Check the LOCAL GRAPH NEIGHBORHOOD Previews (not just titles!) to see if a page for this topic already exists.\n   - If a relevant page exists and the content is complementary, reuse its ID with mode "append".\n   - If a relevant page exists but the content is outdated, reuse its ID with mode "replace".\n   - If no relevant page exists, invent a new descriptive standalone ID.\n`;
-              } else {
-                // Size-based mode: append to the master page
-                chunkPrompt += `1. For the "summaryPage", use the exact id "${masterSummaryId}" with mode "append". Output ONLY the NEW information from this part, which the system will automatically append to the master summary page.\n`;
+              prompt += `\nINGEST INSTRUCTIONS:\n`;
+              prompt += `1. Analyze this content and organize it into appropriate wiki pages. Trust your judgment to decide the best page structure.\n`;
+              prompt += `2. Check the LOCAL GRAPH NEIGHBORHOOD to see if existing pages already cover these topics — reuse/append to them instead of creating duplicates.\n`;
+              prompt += `3. Ensure all pages are well-linked to the existing graph.\n`;
+              prompt += `4. Do NOT use "responseMessage" — this is automated ingestion.\n`;
+
+              if (chunks.length > 1) {
+                prompt += `5. IMPORTANT: You MUST return a "documentOutline" field — a brief, structured summary of ALL topics you have encountered so far (including from previous chunks if any outline was provided). This outline will be passed to subsequent chunks as context. Format it as a compact bullet list.\n`;
               }
 
-              chunkPrompt += `2. Identify key entities and concepts.\n3. Edit existing wiki pages, or create new ones, to weave this information into the wiki.\n`;
-              if (part > 0 && masterSummaryId) {
-                chunkPrompt += `4. IMPORTANT: You MUST include an update for the hub page ("${masterSummaryId}") containing EXACTLY ONE list item (e.g. "- [Your Topic](your_id): description") to append to its Table of Contents. Do NOT include any headers in this update.\n`;
-              }
-              chunkPrompt += `5. If you detect duplicate or redundant pages in the LOCAL GRAPH NEIGHBORHOOD, use "deletePages" to remove them or "mergePages" to combine them.\n`;
-              chunkPrompt += FIDELITY_INSTRUCTIONS;
-              chunkPrompt += `CRITICAL GRAPH INSTRUCTION: You MUST interlink the pages! When typing markdown content, wrap entity/concept names in standard markdown links like [Text](existing_id). NEVER use double brackets [[text]]. ONLY link to IDs that actually exist in the LOCAL GRAPH NEIGHBORHOOD provided above or that you are actively creating. DO NOT hallucinate links.\n\nFormat your response as a JSON object exactly like this:
-        {
-          "summaryPage": { "id": "string", "content": "markdown", "mode": "append" },
-          "updates": [ { "id": "string", "content": "markdown", "mode": "append" } ],
-          "deletePages": [],
-          "mergePages": [],
-          "logEntry": "string (a 1-line description of what was ingested)"
-        }
-        
-      MODES: Each update can have mode "append" (default, adds to end of page) or "replace" (full page overwrite — use when content is outdated or needs restructuring). A backup is automatically created before any replace.
-      Do your best to connect your new pages to the LOCAL GRAPH NEIGHBORHOOD nodes to build a cohesive map.`;
+              const result = await runAgentLoop(provider, prompt, WIKI_SYSTEM_PROMPT);
 
-              const parsed = await callLLM(provider, chunkPrompt, WIKI_SYSTEM_PROMPT, true);
-
-              if (part === 0 && parsed.summaryPage?.id) {
-                masterSummaryId = parsed.summaryPage.id;
+              // Track incremental outline for next chunks
+              if (result.documentOutline) {
+                documentOutline = result.documentOutline;
               }
 
-              await applyWikiUpdates([parsed.summaryPage, ...(parsed.updates || [])]);
-              await executeRestructuringOps(parsed);
-              const chunkPageIds = [parsed.summaryPage?.id, ...(parsed.updates || []).map((u: any) => u.id)].filter(Boolean);
-              updatedPages.push(...chunkPageIds);
-              fileUpdatedPages.push(...chunkPageIds);
-
-              if (parsed.logEntry) await appendToLog(parsed.logEntry);
+              if (result.allWikiUpdates.length > 0) {
+                await applyWikiUpdates(result.allWikiUpdates);
+                const pageIds = result.allWikiUpdates.map((u: any) => u.id).filter(Boolean);
+                updatedPages.push(...pageIds);
+                fileUpdatedPages.push(...pageIds);
+              }
+              await executeRestructuringOps(result.allDeletePages, result.allMergePages, result.pendingSplit);
+              if (result.logEntry) await appendToLog(result.logEntry);
 
               console.log(`${chunkLogPrefix} - Success.`);
             }
@@ -444,7 +489,10 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
             continue;
           }
         }
-        
+
+        // --- Post-ingestion consolidation pass ---
+        await runConsolidationPass(provider, fileUpdatedPages);
+
         // Programmatic Provenance: Append source to all pages touched by this file
         try {
           const uniquePagesForFile = [...new Set(fileUpdatedPages)];
@@ -453,9 +501,9 @@ ingestRouter.post("/files", upload.array("files"), async (req, res) => {
             if (pageId === "index" || pageId === "log") continue;
             const pagePath = path.join(WIKI_DIR, `${pageId}.md`);
             try {
-              const content = await fs.readFile(pagePath, "utf-8");
-              if (!content.includes(`**Source:** [${file.originalname}]`)) {
-                await fs.writeFile(pagePath, content + sourceBlock, "utf-8");
+              const pageContent = await fs.readFile(pagePath, "utf-8");
+              if (!pageContent.includes(`**Source:** [${file.originalname}]`)) {
+                await fs.writeFile(pagePath, pageContent + sourceBlock, "utf-8");
               }
             } catch (e) {}
           }

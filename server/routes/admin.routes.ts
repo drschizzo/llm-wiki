@@ -31,7 +31,7 @@ adminRouter.post("/clean-links", async (req, res) => {
         let cleanTarget = target.trim();
         if (cleanTarget.endsWith('.md')) cleanTarget = cleanTarget.slice(0, -3);
 
-        if (cleanTarget.startsWith('http') || cleanTarget.startsWith('#')) return match;
+        if (cleanTarget.startsWith('http') || cleanTarget.startsWith('#') || cleanTarget.startsWith('/')) return match;
 
         if (!validIds.has(cleanTarget)) {
           fileModified = true;

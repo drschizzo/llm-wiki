@@ -1,7 +1,7 @@
 import { Router } from "express";
 import fs from "fs/promises";
 import path from "path";
-import { WIKI_DIR, RAW_DIR } from "../config";
+import { WIKI_DIR, RAW_DIR, WIKI_TOOLS_SPEC } from "../config";
 import { callLLM } from "../services/llm.service";
 import { loadGraph, getSubgraphForText } from "../services/graph.service";
 import { applyWikiUpdates, appendToLog, deletePage, mergePages, splitPage } from "../services/wiki.service";
@@ -23,59 +23,14 @@ You have access to the Local Graph Neighborhood (nodes relevant to the user's pr
 ${localGraphContext}
 ---
 
-Before answering, you can explore the wiki deeply using two actions:
-1. "exploreGraph": ["id"] -> To get the neighbors (links to and from) a specific node.
-2. "readPages": ["id"] -> To read the full text content of a node.
+${WIKI_TOOLS_SPEC}
 
-If you don't need any more context, formulate your reply in "responseMessage".
-
-CRITICAL INSTRUCTIONS FOR AUTONOMY & CONNECTIVITY:
-1. NEVER ask for permission to update or create wiki pages. If the conversation contains new, valuable information, concepts, or corrections, you MUST update the wiki IMMEDIATELY by populating the "wikiUpdates" array.
+CHAT-SPECIFIC INSTRUCTIONS:
+1. NEVER ask for permission to update or create wiki pages. If the conversation contains new, valuable information, you MUST update the wiki IMMEDIATELY.
 2. DO NOT say "I will analyze this" or "I'm reading" or "Let me check". Work silently.
-3. ISOLATED PAGES ARE PROHIBITED. If you create a NEW page, you MUST simultaneously update at least one EXISTING page (check the Local Graph Neighborhood) in the "wikiUpdates" array to add a link pointing to your newly created page. Conversely, your new page MUST link to existing pages. Use standard markdown links!
-4. IMPORTANT Source Tracking: For ANY new page you create, you MUST append \`\\n\\n---\\n**Source:** [Conversation Transcript](/raw/${chatId}.md)\` to the bottom of the page content.
-
-WIKI RESTRUCTURING OPERATIONS:
-You have powerful tools to keep the wiki clean and well-organized:
-
-5. **deletePages**: Use this to remove pages that are redundant, empty, outdated, or whose content has been fully integrated into another page. Provide an array of page IDs to delete. Dead links will be automatically cleaned.
-
-6. **mergePages**: Use this when two pages cover the same topic (e.g. "machine-learning" and "apprentissage-automatique", or partial duplicates). Provide an array of { "target": "page_to_keep", "source": "page_to_absorb" } objects. The source content will be appended to target, all links to source will be redirected to target, and source will be deleted.
-
-7. **splitPage**: Use this when a single page has grown too large (roughly over 3000 words / 15000 characters) and covers multiple distinct sub-topics. Provide the sourceId and an array of sections, each with an id, title, and content. The original page will become a hub/TOC linking to the sub-pages.
-
-8. **mode: "replace"** in wikiUpdates: When updating an existing page, you can set mode to "replace" to COMPLETELY OVERWRITE the page content instead of appending. Use this when the existing content is obsolete, badly structured, or needs full reorganization. A backup is automatically created before replacement.
-   - Default mode is "append" (adds content to the end of the page).
-   - Use "replace" sparingly — only when the page truly needs a full rewrite.
-
-WHEN TO USE EACH OPERATION:
-- Page is redundant/empty/obsolete → deletePages
-- Two pages cover the same topic → mergePages (keep the better one as target)
-- A page is too long with multiple sub-topics → splitPage
-- A page has outdated/badly structured content → wikiUpdates with mode "replace"
-- Adding new information to an existing page → wikiUpdates with mode "append" (default)
-
-Format your response as a JSON object exactly like this:
-{
-  "exploreGraph": ["page_id_1"],
-  "readPages": ["page_id_1", "page_id_2"],
-  "responseMessage": "Your final reply to the user... (leave empty if you are exploring or reading)",
-  "wikiUpdates": [
-    { "id": "page_id_to_create_or_update", "content": "full markdown content...", "mode": "append" }
-  ],
-  "deletePages": ["obsolete_page_id"],
-  "mergePages": [{ "target": "page_to_keep", "source": "page_to_absorb" }],
-  "splitPage": {
-    "sourceId": "too_big_page",
-    "sections": [
-      { "id": "sub_topic_a", "title": "Sub Topic A", "content": "..." },
-      { "id": "sub_topic_b", "title": "Sub Topic B", "content": "..." }
-    ]
-  },
-  "logEntry": "1-line summary of what you changed (only if you made updates)"
-}
-
-If no updates are needed, leave "wikiUpdates" as an empty array [], omit "logEntry", and leave restructuring fields empty or as empty arrays.`;
+3. ISOLATED PAGES ARE PROHIBITED. New pages MUST link to existing pages, and at least one existing page must be updated to link back.
+4. Source Tracking: For ANY new page you create, append \`\\n\\n---\\n**Source:** [Conversation Transcript](/raw/${chatId}.md)\` to the bottom of the page content.
+5. Use "responseMessage" to reply to the user. Leave it empty only if you are still exploring/reading.`;
 
   let currentPrompt = history.map((msg: any) => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`).join('\n') + '\n\nAssistant:';
 
@@ -139,7 +94,6 @@ If no updates are needed, leave "wikiUpdates" as an empty array [], omit "logEnt
 
         if (requestedExplore.length > 0) {
           for (const id of requestedExplore) {
-            // Using getSubgraphForText on the ID text essentially pulls its direct neighbors
             const nodeSubgraph = await getSubgraphForText(id + " " + (fullGraph.nodes[id]?.title || ""), fullGraph, 20);
             extraContext += `\n--- GRAPH EXPLORATION: ${id} ---\n${nodeSubgraph}\n`;
           }
