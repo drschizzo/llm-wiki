@@ -1,84 +1,167 @@
-# LLM-Wiki : Base de Connaissances Intelligente & Graphe Autonome
+# LLM-Wiki
 
-## Concept du Projet
+Base de connaissances auto-organisée par LLM avec graphe de connaissances interactif.
 
-**LLM-Wiki** est une application innovante conçue pour transformer la gestion documentaire statique (comme les fichiers Markdown ou les notes Obsidian) en un **Graphe de Connaissances dynamique, intelligent et interconnecté**.
+## Qu'est-ce que c'est ?
 
-En alliant la puissance des Modèles de Langage (LLM - Gemini, modèles locaux via LM Studio ou Ollama) et une interface wiki réactive, ce projet permet non seulement de stocker des informations, mais aussi d'interagir avec elles, de les lier automatiquement et de les structurer intelligemment. 
+LLM-Wiki transforme vos documents (fichiers texte, images, URLs, archives ZIP) en un wiki structuré et interconnecté. Un agent LLM analyse le contenu, crée des pages, et construit automatiquement un graphe de liens entre les concepts.
 
-C'est l'outil parfait pour maintenir une base de connaissances personnelle ou d'entreprise qui s'auto-organise et répond à vos questions directes en se basant sur le contexte de vos propres documents (RAG - Retrieval-Augmented Generation).
+Contrairement à un wiki classique où vous organisez manuellement, ici le LLM décide de la structure : il crée, fusionne, découpe et relie les pages de manière autonome.
 
-## Possibilités et Fonctionnalités
+## Fonctionnalités
 
-*   **Wiki augmenté par LLM :** Éditeur Markdown riche (`@uiw/react-md-editor`) intégré avec une aide à l'écriture et au formatage.
-*   **Traçabilité et Provenance des Données (Data Provenance) :** Le système sauvegarde la source originale lors de l'ingestion de vos documents. Chaque page du wiki dispose d'un lien vous permettant de consulter sa source (qu'il s'agisse d'un fichier importé ou de la conversation de chat précise ayant déclenché sa création).
-*   **Assistant Chat Avancé :** Interrogez votre base de connaissances via un panneau de chat avec support multi-lignes (raccourci `Shift+Enter`). Initiez de nouvelles conversations à la volée et injectez facilement la page wiki courante en tant que référence de contexte pour le LLM.
-*   **Visualisation par Graphe (Knowledge Graph) :** Explorez vos notes avec une carte visuelle interactive 2D (nœuds et liens) qui modélise explicitement les connexions entre vos idées. Le graphe filtre désormais astucieusement les documents de système (index, logs) pour un focus absolu sur les données pertinentes.
-*   **Ingestion Automatisée de Cerveaux Numériques :** 
-    * Importez massivement et consolidez vos archives fragmentées (telles que des bases Obsidian).
-    * Le système analyse, extrait des résumés et crée automatiquement des hyperliens croisés efficients entre vos concepts pour unifier vos données.
-*   **Agence Autonome Moteur :** Des agents proactifs basés sur l'IA interviennent sur l'intégrité applicative. Ils se chargent d'exploiter les graphes partitionnés, de construire une documentation croisée autonome et d'évoluer en assurant des résultats cohérents sous la contrainte critique des limitations de tokens.
-*   **Gestion de Pages intuitive :** Création, édition avancée et **suppression** de pages. Chaque action synchronise instantanément et sans effort la représentation du graphe sur le frontend.
-*   **Navigation Transparente :** Une Single Page Application (React) couplée à un respect de l'historique natif de navigation web (PushState / PopState localisé), dotée d'une doc modal d'aide d'interface discrète et claire.
+### Ingestion de documents
 
-## Architecture Technique
+- **Fichiers texte** : Markdown, `.txt`, code source — le LLM analyse le contenu et le distribue en pages thématiques
+- **Images** : Analyse visuelle (diagrammes, captures d'écran) et création de pages descriptives
+- **URLs** : Extraction du contenu web et intégration au wiki
+- **Archives ZIP** : Extraction et traitement récursif de tous les fichiers
+- **Chunking automatique** : Les documents dépassant `MAX_CHUNK_LENGTH` sont découpés en morceaux avec un mécanisme d'**outline incrémental** pour que le LLM garde le contexte global
+- **Déduplication hachée** : Les fichiers déjà ingérés (hash SHA-256) sont automatiquement ignorés
+- **Consolidation post-ingestion** : Après chaque fichier, un pass automatique détecte et fusionne les pages quasi-identiques
+- **Provenance** : Chaque page créée reçoit un lien vers le fichier source original
 
-Le projet repose sur une pile Full-Stack moderne, structurée et modulaire (déployant front, intelligence artificielle et une architecture backend évolutive et testable) :
+### Agent wiki autonome
 
-*   **Frontend (Interface Utilisateur) :** 
-    * **React 19** propulsé par **Vite** pour un tooling et un build ultra-rapides, sur une architecture de composants fine spécialisée (Modales d'ingestion, Chat contextuel séparé, Graphe, etc).
-    * **TypeScript** garantissant la sécurité et le typage du code.
-    * **Tailwind CSS v4** pour un design fluide, moderne et responsive.
-    * `react-force-graph-2d` pour le rendu interactif du Knowledge Graph.
-*   **Backend & Serveur Local :** 
-    * API Express découplée : le point d'entrée modulaire (`server/index.ts`) distribue les micro-services clés (LLM, Graph, Wiki), la configuration centralisée et le routage métier (API Routes).
-    * Accès robuste au système de fichiers local (`fs`) gérant d'un côté la production (`data/wiki`) et de l'autre la pérennité du lineage de contenu original de vos bases ingérées.
-*   **Moteur d'Intelligence Artificielle (LLM) :**
-    * Support natif de Google Gemini avec `@google/genai` pour des performances et capacités d'instruction remarquables.
-    * Flexibilité modulaire permettant d'adopter des LLM locaux et alternatifs tels que **LM Studio** et **Ollama**, aisément déclarés depuis vos variables d'environnement.
+L'agent LLM dispose des opérations suivantes, disponibles aussi bien en ingestion qu'en chat :
 
-## Configuration et Lancement
+| Opération | Description |
+|---|---|
+| `wikiUpdates` | Créer ou modifier des pages (modes `append` / `replace`) |
+| `deletePages` | Supprimer des pages obsolètes (nettoyage automatique des liens morts) |
+| `mergePages` | Fusionner deux pages sur le même sujet (redirection des liens) |
+| `splitPage` | Découper une page trop grande en sous-pages avec hub/TOC |
+| `exploreGraph` | Explorer les voisins d'un nœud du graphe |
+| `readPages` | Lire le contenu complet de pages existantes |
 
-Cette section vous guide pour installer, configurer et démarrer le projet sur votre machine.
+L'agent utilise une **boucle agentic** (jusqu'à 4 itérations) : il peut explorer le graphe et lire des pages avant de décider quelles modifications apporter.
+
+### Chat contextuel
+
+- Interrogez votre base via un panneau de chat intégré
+- L'agent peut lire, créer et modifier des pages pendant la conversation
+- Support multi-lignes (`Shift+Enter`)
+- Bouton "Référencer la page" pour injecter le contexte de la page courante
+- Chaque conversation est sauvegardée comme source (traçabilité)
+
+### Knowledge Graph interactif
+
+- Visualisation 2D interactive des pages et de leurs connexions (`react-force-graph-2d`)
+- **Clusters** : Regroupement visuel de pages par thème avec palette de couleurs
+- Gestion des liens : création et suppression via l'API
+- Filtrage automatique des pages système (index, log)
+
+### Édition de pages
+
+- Éditeur Markdown intégré (`@uiw/react-md-editor`)
+- Création, édition et suppression de pages
+- Recherche full-text sur l'ensemble du wiki
+- Index auto-généré alphabétiquement à partir du graphe
+
+### Administration
+
+- Nettoyage des liens morts (`POST /api/admin/clean-links`)
+- Fusion manuelle de pages (`POST /api/admin/merge`)
+- Découpage manuel de pages (`POST /api/admin/split`)
+- Système de backup automatique avant opérations destructives (`data/backups/`)
+
+## Architecture
+
+```
+llm-wiki/
+├── server/
+│   ├── index.ts              # Point d'entrée Express + Vite middleware
+│   ├── config.ts             # Configuration, prompts et WIKI_TOOLS_SPEC partagé
+│   ├── types.ts              # Types TypeScript (WikiGraph)
+│   ├── routes/
+│   │   ├── chat.routes.ts    # Chat agentic avec boucle explore/read/act
+│   │   ├── ingest.routes.ts  # Ingestion fichiers/URL/images + consolidation
+│   │   ├── wiki.routes.ts    # CRUD pages + recherche
+│   │   ├── graph.routes.ts   # API graphe + gestion des liens
+│   │   ├── cluster.routes.ts # CRUD clusters visuels
+│   │   └── admin.routes.ts   # Outils d'administration (clean/merge/split)
+│   └── services/
+│       ├── llm.service.ts    # Abstraction multi-provider (Gemini, LM Studio, Ollama)
+│       ├── graph.service.ts  # Construction du graphe + snippets + index auto
+│       ├── wiki.service.ts   # Opérations wiki (CRUD, merge, split, delete, backup)
+│       └── cluster.service.ts # Gestion des clusters visuels
+├── client/                   # Frontend React 19
+├── data/
+│   ├── wiki/                 # Pages markdown du wiki
+│   ├── raw/                  # Fichiers sources originaux
+│   ├── backups/              # Backups automatiques avant opérations destructives
+│   ├── graph.json            # Graphe de connaissances sérialisé
+│   └── processed_hashes.json # Hashes des fichiers déjà ingérés
+└── .env                      # Configuration des providers LLM
+```
+
+## Providers LLM supportés
+
+| Provider | Usage | Configuration |
+|---|---|---|
+| **Google Gemini** | Cloud, haute capacité | `GEMINI_API_KEY` |
+| **LM Studio** | Local, compatible OpenAI | `LMSTUDIO_API_URL` |
+| **Ollama** | Local, open-source | `LMSTUDIO_API_URL` + `LOCAL_MODEL_NAME` |
+
+## Installation
 
 ### Prérequis
-*   **Node.js** (version LTS récente recommandée).
-*   Une clé API **Google Gemini** OU une instance serveur **LM Studio / Ollama** fonctionnelle.
 
-### 1. Installation
+- **Node.js** v18+
+- Une clé API Gemini **ou** une instance LM Studio / Ollama locale
 
-Clonez ce dépôt, puis installez toutes les dépendances requises par le gestionnaire système :
+### Setup
 
 ```bash
+# Cloner et installer
+git clone <repo-url>
+cd llm-wiki
 npm install
-```
 
-### 2. Configuration (`.env`)
-
-Basez-vous sur l'exemple de configuration embarqué en copiant le `.env.example` en `.env` :
-
-```bash
+# Configurer
 cp .env.example .env
+# Éditer .env avec votre clé API / URL locale
 ```
 
-Ouvrez puis complétez vos clés et endpoints locaux ciblés :
+### Configuration `.env`
 
 ```env
-# Renseignez votre clé API Google Gemini
-GEMINI_API_KEY="votre-cle-api-gemini-ici"
+# Google Gemini (requis si provider = gemini)
+GEMINI_API_KEY="votre-clé"
 
-# Port / URL de l'API locale si vous utilisez LM Studio / Ollama (Optionnel)
-# (Laissez vide ou commentez si vous souhaitez vous appuyer sur le provider par défaut)
-LM_STUDIO_URL="http://localhost:1234/v1"
+# LM Studio ou Ollama (optionnel)
+LMSTUDIO_API_URL="http://localhost:1234/v1/chat/completions"
+LOCAL_MODEL_NAME="local-model"
+
+# Taille max d'un chunk avant découpage automatique (défaut: 30000 caractères)
+MAX_CHUNK_LENGTH="30000"
 ```
 
-### 3. Démarrage du Serveur
-
-Il ne vous reste plus qu'à lancer le système unifié par son script de lacement développement :
+### Lancement
 
 ```bash
 npm run dev
 ```
 
-L'application compilera le front-end React avec Vite et lancera le service backend simultanément (`tsx server/index.ts`). 
-*Une fois le serveur en ligne et l'API validée, rendez-vous sur l'URL locale indiquée dans le récapitulatif du terminal (ex: `http://localhost:5173/`) pour explorer et déployer votre graphe.*
+Le serveur démarre sur `http://localhost:3000` (backend + frontend Vite en mode dev).
+
+## API
+
+| Méthode | Route | Description |
+|---|---|---|
+| `POST` | `/api/chat` | Chat avec l'agent wiki |
+| `POST` | `/api/ingest/files` | Ingestion de fichiers (multipart) |
+| `POST` | `/api/ingest/url` | Ingestion d'une URL |
+| `GET` | `/api/wiki` | Liste des pages |
+| `GET` | `/api/wiki/:id` | Contenu d'une page |
+| `POST` | `/api/wiki/:id` | Créer/modifier une page |
+| `DELETE` | `/api/wiki/:id` | Supprimer une page |
+| `GET` | `/api/graph` | Graphe complet (nœuds + liens + clusters) |
+| `POST` | `/api/graph/link` | Créer un lien entre deux pages |
+| `DELETE` | `/api/graph/link` | Supprimer un lien |
+| `GET` | `/api/search?q=` | Recherche full-text |
+| `GET/POST/PUT/DELETE` | `/api/clusters` | CRUD clusters |
+| `POST` | `/api/admin/clean-links` | Nettoyer les liens morts |
+| `POST` | `/api/admin/merge` | Fusionner deux pages |
+| `POST` | `/api/admin/split` | Découper une page |
+| `GET` | `/raw/:filename` | Accès aux fichiers sources originaux |
